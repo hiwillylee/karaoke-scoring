@@ -286,6 +286,10 @@
     <h3>連線與硬體</h3>
     <dl id="server-info" class="info-grid muted small">讀取中…</dl>
   </div>
+  <div class="card hidden" id="gpu-card">
+    <h3>顯示卡加速</h3>
+    <div id="gpu-settings"></div>
+  </div>
   <div class="card">
     <h3>延遲設定檔</h3>
     <p class="muted small">每一組「麥克風 × 輸出裝置」各自記一份，換耳機不用重測。</p>
@@ -326,6 +330,15 @@
   </div>
   <div class="row"><button id="settings-back" class="ghost">返回</button></div>
 </section>
+
+<!-- ── 第一次開啟：詢問是否啟用顯示卡加速 ─────────────────── -->
+<div id="gpu-dialog" class="gpu-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="gpu-dialog-title">
+  <div class="gpu-dialog-card">
+    <div class="tour-step">偵測到 NVIDIA 顯示卡</div>
+    <h3 id="gpu-dialog-title">要使用顯示卡加速嗎？</h3>
+    <div id="gpu-dialog-body"></div>
+  </div>
+</div>
 
 <!-- ── 第一次使用導覽 ─────────────────────────────────────── -->
 <div id="tour" class="tour hidden">

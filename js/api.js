@@ -123,6 +123,36 @@ export function trackJob(jobId, onProgress) {
 
 export const serverInfo = () => json('api/info');
 
+// ---- 顯示卡加速包（只有這台電腦能操作） -------------------------------------
+
+export const gpuStatus = () => json('api/gpu');
+export const gpuAction = (action) => json(`api/gpu/${action}`, { method: 'POST' });
+
+export async function saveServerSettings(patch) {
+  return json('api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+/** 請伺服器重新啟動自己，等新的那份起來後才回傳。 */
+export async function restartApp() {
+  // 用行程編號分辨新舊：舊的那份收尾期間可能還會回應
+  const oldPid = (await json('api/info').catch(() => ({}))).pid;
+  try {
+    await json('api/restart', { method: 'POST' });
+  } catch (err) {
+    if (!(err instanceof TypeError)) throw err;   // 連線中斷＝已經在關了
+  }
+  for (let i = 0; i < 90; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const info = await json('api/info').catch(() => null);
+    if (info && info.pid !== oldPid) return;
+  }
+  throw new Error('等了 90 秒程式還沒重新啟動，請手動開啟');
+}
+
 /**
  * 請伺服器關掉自己。
  *

@@ -161,6 +161,7 @@ https 用的是啟動時自動產生的自簽憑證（`certs/`，涵蓋 localhos
 | `library.py` | 伺服器端曲庫：音檔、譜面、每首歌的調整參數 |
 | `fetcher.py` | 用 yt-dlp 從 YouTube／YouTube Music／Bilibili 取得音訊 |
 | `tunnel.py` | Cloudflare Quick Tunnel：臨時公開網址的建立與收拾 |
+| `gpu_pack.py` | Windows 版的 NVIDIA 加速包：偵測 N 卡、下載 CUDA 版 PyTorch、驗證後啟用 |
 | `js/api.js` | 前端與伺服器曲庫的溝通、音軌依需求下載與本機快取 |
 | `js/tour.js` | 第一次使用的分步導覽 |
 | `js/storage.js` | IndexedDB：音軌快取、成績、延遲設定檔 |
@@ -178,7 +179,8 @@ https 用的是啟動時自動產生的自簽憑證（`certs/`，涵蓋 localhos
   但影片頁的取流不受影響。
 - 用喇叭演唱時麥克風會收到伴奏，音高偵測會受干擾，建議戴耳機。
 - 升降調用的是 WSOLA，超過 ±5 半音時伴奏會開始出現金屬感。
-- 顯示卡加速：NVIDIA（CUDA）與 Apple Silicon（Metal）可用；AMD 在 Windows 上
+- 顯示卡加速：NVIDIA（CUDA）與 Apple Silicon（Metal）可用。Windows 安裝檔內附 CPU 版，
+  偵測到 N 卡時第一次開啟會詢問要不要下載加速包（約 2.5GB）。AMD 在 Windows 上
   沒有官方 PyTorch 支援，Intel 內顯不一定比多核 CPU 快。程式會自動偵測、
   實際試跑，跑不動就退回 CPU。詳見 `打包說明.md`。
 

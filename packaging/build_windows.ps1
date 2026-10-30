@@ -9,18 +9,19 @@
 #      （沒有 Inno Setup 也可以，會改成輸出免安裝的 zip）
 #
 # 用法（在專案根目錄開 PowerShell）：
-#   packaging\build_windows.ps1                 # 預設：NVIDIA CUDA 版
-#   packaging\build_windows.ps1 -Backend cpu    # 純 CPU，體積小很多
+#   packaging\build_windows.ps1                 # 預設：CPU 版（建議發佈這個）
+#   packaging\build_windows.ps1 -Backend cuda   # 內建 NVIDIA CUDA（約 2.8GB，超過 GitHub 2GB 上限）
 #   packaging\build_windows.ps1 -Backend xpu    # Intel 顯示卡
 #
-# 關於顯示卡加速：同一份 PyTorch 只能內含一種 GPU 後端，CUDA 版與 XPU 版
-# 是不同的 wheel。程式執行時會自動偵測、跑不動就退回 CPU，所以選錯不會壞掉，
-# 只是該張卡不會被加速。
+# 關於顯示卡加速：同一份 PyTorch 只能內含一種 GPU 後端。預設發佈 CPU 版，
+# 使用者電腦上偵測到 N 卡時，程式第一次開啟會詢問要不要下載 NVIDIA 加速包
+# （從 PyTorch 官方伺服器抓同版號的 CUDA 版 torch，見 gpu_pack.py），
+# 所以一個安裝檔就能涵蓋有沒有 N 卡的人。
 
 [CmdletBinding()]
 param(
   [ValidateSet('cuda', 'cpu', 'xpu', 'directml')]
-  [string]$Backend = 'cuda',
+  [string]$Backend = 'cpu',
   [string]$CudaTag = 'cu126',
   [string]$Version = '1.0.0'
 )
@@ -100,7 +101,7 @@ Get-ChildItem -Path (Join-Path $Stage 'lib') -Recurse -Include '*.lib', '*.pdb' 
 Write-Host '==> 複製程式與網頁資源'
 $AppDir = Join-Path $Stage 'app'
 New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-foreach ($item in 'server.py', 'analyze.py', 'launcher.py', 'library.py', 'fetcher.py', 'tunnel.py', 'index.html', 'js', 'css', 'config', 'assets') {
+foreach ($item in 'server.py', 'analyze.py', 'launcher.py', 'library.py', 'fetcher.py', 'tunnel.py', 'gpu_pack.py', 'index.html', 'js', 'css', 'config', 'assets') {
   Copy-Item -Recurse -Force (Join-Path $Proj $item) (Join-Path $AppDir $item)
 }
 

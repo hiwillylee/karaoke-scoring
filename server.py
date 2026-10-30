@@ -29,6 +29,7 @@ import shutil
 import signal
 import socket
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -332,13 +333,33 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         path, _ = self._query()
 
-        if path == "/api/quit":
+        if path in ("/api/quit", "/api/restart"):
             # 手機連進來的人不該能關掉別人的電腦
             if not self.is_local():
                 self._json({"error": "只能從這台電腦操作"}, 403)
                 return
+            restart = path == "/api/restart"
+            if restart and not can_restart():
+                self._json({"error": "開發模式不支援自動重新啟動，請手動重開"}, 400)
+                return
             self._json({"ok": True})
-            threading.Thread(target=quit_app, daemon=True).start()
+            threading.Thread(target=quit_app, args=(restart,), daemon=True).start()
+            return
+
+        if path.startswith("/api/gpu/"):
+            # 下載 2.5GB、改動這台電腦的安裝內容，只給本機操作
+            if not self.is_local():
+                self._json({"error": "只能從這台電腦操作"}, 403)
+                return
+            import gpu_pack
+            action = {"/api/gpu/start": gpu_pack.PACK.start,
+                      "/api/gpu/cancel": gpu_pack.PACK.cancel,
+                      "/api/gpu/remove": gpu_pack.PACK.remove}.get(path)
+            if action is None:
+                self.send_error(404)
+                return
+            result = action()
+            self._json(result, 400 if "error" in result else 200)
             return
 
         if path.startswith("/api/tunnel/"):
@@ -358,7 +379,8 @@ class Handler(SimpleHTTPRequestHandler):
                 self._json({"error": "只能從這台電腦操作"}, 403)
                 return
             body = self._read_json_body()
-            patch = {k: bool(v) for k, v in body.items() if k == "tunnelOnStart"}
+            patch = {k: bool(v) for k, v in body.items()
+                     if k in ("tunnelOnStart", "gpuPromptAnswered")}
             self._json(save_settings(patch))
             return
 
@@ -540,6 +562,15 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_bytes(make_qr_svg(url), "image/svg+xml; charset=utf-8")
             return
 
+        if path == "/api/gpu":
+            import gpu_pack
+            st = gpu_pack.PACK.status()
+            st["isLocal"] = self.is_local()
+            st["canRestart"] = can_restart()
+            st["promptAnswered"] = bool(load_settings().get("gpuPromptAnswered"))
+            self._json(st)
+            return
+
         if path == "/api/info":
             info = server_info()
             info["isLocal"] = self.is_local()
@@ -625,6 +656,7 @@ def make_qr_svg(url: str) -> bytes:
 def server_info() -> dict:
     """給介面顯示：內網網址與目前使用的運算裝置。"""
     info = dict(INFO)
+    info["pid"] = os.getpid()  # 重新啟動時，網頁靠這個分辨新舊行程
     try:
         import analyze as analyzer
         info["devices"] = analyzer.describe_devices()
@@ -694,8 +726,30 @@ def start() -> dict:
     return INFO
 
 
-def quit_app() -> None:
-    """網頁按「關閉程式」時走這裡。
+def can_restart() -> bool:
+    """只有從 launcher.py 啟動（打包後）才知道怎麼把自己重新開起來。"""
+    return "launcher" in sys.modules or Path(sys.argv[0]).name == "launcher.py"
+
+
+def spawn_replacement() -> None:
+    """開一份新的程式接手。新的那份會先等這份把連接埠放掉才開始服務。"""
+    env = dict(os.environ)
+    env["KARAOKE_RESTARTING"] = "1"
+    env.pop("KARAOKE_GPU_PACK", None)  # 讓新的那份自己重新判斷要不要載入加速包
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = (subprocess.DETACHED_PROCESS
+                               | subprocess.CREATE_NEW_PROCESS_GROUP
+                               | subprocess.CREATE_NO_WINDOW)
+    else:
+        kw["start_new_session"] = True
+    subprocess.Popen([sys.executable, "-s", "-E", "-B", str(ROOT / "launcher.py")],
+                     env=env, close_fds=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+
+
+def quit_app(restart: bool = False) -> None:
+    """網頁按「關閉程式」或「重新啟動」時走這裡。
 
     要先把 HTTP 回應送完才能真的關，否則瀏覽器只會看到連線被切斷。
     子行程（cloudflared、常駐的人聲分離工作行程）一定要主動收掉，
@@ -712,6 +766,12 @@ def quit_app() -> None:
         try:
             stop_worker()
         except Exception:
+            traceback.print_exc()
+    if restart:
+        try:
+            spawn_replacement()
+            print("重新啟動中…", flush=True)
+        except Exception:  # noqa: BLE001
             traceback.print_exc()
     sys.stdout.flush()
     sys.stderr.flush()

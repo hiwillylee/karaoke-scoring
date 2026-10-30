@@ -101,7 +101,15 @@ def setup_environment() -> tuple[Path, Path]:
     if lib.is_dir():
         sys.path.insert(0, str(lib))
 
+    # NVIDIA 加速包（設定頁下載的 CUDA 版 torch）要排在內附套件前面，
+    # 才會蓋過內附的 CPU 版。詳見 gpu_pack.py。
     sys.path.insert(0, str(root))
+    import gpu_pack
+    gpu_pack.cleanup_leftovers(data)
+    pack = gpu_pack.active_pack(data, lib if lib.is_dir() else None)
+    if pack:
+        sys.path.insert(1, str(pack))
+        os.environ["KARAOKE_GPU_PACK"] = str(pack)
     return root, data
 
 
@@ -137,13 +145,28 @@ def main() -> int:
     print(f"資料目錄：{data}")
     print(f"記錄檔：{log_path}")
 
+    pack = os.environ.get("KARAOKE_GPU_PACK")
+    if pack:
+        print(f"使用 NVIDIA 加速包：{pack}")
     try:
         import server
+        if pack:
+            import torch  # noqa: F401  加速包壞掉的話，在這裡就會炸
     except Exception as exc:  # noqa: BLE001
         print(f"無法載入伺服器：{exc}")
         import traceback
         traceback.print_exc()
+        if pack:
+            # 加速包讓程式起不來，停用它，下次啟動退回內附的 CPU 版
+            import gpu_pack
+            gpu_pack.disable_pack(data, f"{type(exc).__name__}: {exc}")
+            print("！已停用 NVIDIA 加速包，請重新開啟程式")
         return 1
+
+    # 從網頁按「重新啟動」時，舊的那份還在收尾，等它把連接埠放掉
+    restarting = bool(os.environ.pop("KARAOKE_RESTARTING", ""))
+    if restarting:
+        wait_until_down(server.HTTP_PORT)
 
     # 已經有一份在服務就別再開一個，直接把瀏覽器帶過去
     running = already_serving(server.HTTP_PORT)
@@ -163,9 +186,11 @@ def main() -> int:
     # 背景先把運算裝置探測好，第一首歌就不用等
     threading.Thread(target=warm_up, daemon=True).start()
 
-    # 等伺服器真的能接受連線再開瀏覽器，避免出現連線失敗的分頁
+    # 等伺服器真的能接受連線再開瀏覽器，避免出現連線失敗的分頁。
+    # 重新啟動時原本的分頁會自己重新載入，不用再開一個。
     if wait_until_up(info["httpPort"]):
-        open_browser(local_url)
+        if not restarting:
+            open_browser(local_url)
     else:
         print("！伺服器沒有在時限內就緒，請手動開啟上面的網址")
 
@@ -217,6 +242,18 @@ def wait_until_up(port: int, timeout: float = 15.0) -> bool:
                 return True
         time.sleep(0.2)
     return False
+
+
+def wait_until_down(port: int, timeout: float = 15.0) -> None:
+    import socket
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return
+        time.sleep(0.2)
 
 
 def warm_up() -> None:

@@ -1703,6 +1703,137 @@ $('#tunnel-on-start').addEventListener('change', async (e) => {
 
 $('#connect-back').addEventListener('click', () => { show('library'); renderLibrary(); });
 
+// ── 顯示卡加速 ──────────────────────────────────────────────
+//
+// Windows 安裝檔內附的是 CPU 版 PyTorch（CUDA 版太大，放不上 GitHub Releases）。
+// 偵測到 N 卡時，第一次開啟就問要不要下載 NVIDIA 加速包，設定頁也能隨時開關。
+// 實際的下載、驗證與載入見 gpu_pack.py。
+
+const GPU_BUSY = ['downloading', 'extracting', 'verifying'];
+let gpuPoll = null;
+let gpuDialogDone = null;   // 第一次詢問的視窗關掉時呼叫，接著才開始導覽
+
+const gb = (bytes) => `${(bytes / 1073741824).toFixed(2)} GB`;
+
+function gpuHtml(st, inDialog) {
+  const gpu = st.gpu ? `<span class="gpu-name">${escapeHtml(st.gpu.name)}</span>` : '';
+  const note = st.disabledReason
+    ? `<p class="gpu-error">上次的加速包無法啟動，已自動停用：${escapeHtml(st.disabledReason)}</p>` : '';
+
+  if (st.loaded) {
+    return `<p>正在使用 ${gpu} 加速音源分離。</p>
+      ${inDialog ? '' : '<div class="row"><button class="ghost tiny danger" data-gpu="remove">改回 CPU（移除加速包）</button></div>'}`;
+  }
+  if (st.needRestart || st.state === 'done') {
+    return `<p>NVIDIA 加速包已經裝好，重新啟動程式後生效。</p>
+      <div class="row">
+        ${st.canRestart ? '<button class="primary" data-gpu="restart">立即重新啟動</button>' : '<span class="muted small">請關閉程式後重新開啟</span>'}
+        ${inDialog ? '<button class="ghost" data-gpu="close">稍後再說</button>' : ''}
+      </div>`;
+  }
+  if (GPU_BUSY.includes(st.state)) {
+    const pct = st.total ? Math.min(100, (st.done / st.total) * 100) : 0;
+    const size = st.state === 'downloading' && st.total ? `${gb(st.done)} / ${gb(st.total)}` : '';
+    return `<p>${escapeHtml(st.message || '處理中…')}</p>
+      <div class="progress"><div class="progress-bar" style="width:${st.state === 'downloading' ? pct : 100}%"></div></div>
+      <p class="small">${size}</p>
+      <div class="row">
+        ${inDialog ? '<button class="ghost" data-gpu="close">在背景下載</button>' : ''}
+        <button class="ghost tiny danger" data-gpu="cancel">取消</button>
+      </div>`;
+  }
+  if (!st.available) {
+    return `<p>${escapeHtml(st.reason || '這台電腦無法使用 NVIDIA 加速。')}</p>${note}`;
+  }
+
+  const error = st.state === 'error' ? `<p class="gpu-error">下載失敗：${escapeHtml(st.error)}</p>` : '';
+  const stale = st.stale ? '<p>程式更新過，需要重新下載對應版本的加速包。</p>' : '';
+  return `<p>這台電腦有 ${gpu}，可以讓「加歌」時的音源分離快約 5～10 倍。</p>
+    <p class="small">需要從 PyTorch 官方伺服器下載約 2 GB（會佔用約 4 GB 磁碟空間），
+      下載期間照常可以唱歌。不啟用也能用，只是分離一首歌要 1～3 分鐘。</p>
+    ${stale}${note}${error}
+    <div class="row">
+      <button class="primary" data-gpu="start">${st.state === 'error' ? '重試' : '啟用顯示卡加速'}</button>
+      ${inDialog ? '<button class="ghost" data-gpu="skip">先不要</button>' : ''}
+    </div>`;
+}
+
+async function renderGpu() {
+  let st;
+  try {
+    st = await api.gpuStatus();
+  } catch {
+    return null;
+  }
+  // 手機連進來的人不該能替這台電腦下載東西，卡片整個藏起來
+  $('#gpu-card').classList.toggle('hidden', !st.isLocal);
+  $('#gpu-settings').innerHTML = gpuHtml(st, false);
+  if (!$('#gpu-dialog').classList.contains('hidden')) {
+    $('#gpu-dialog-body').innerHTML = gpuHtml(st, true);
+  }
+  clearTimeout(gpuPoll);
+  if (GPU_BUSY.includes(st.state)) gpuPoll = setTimeout(renderGpu, 1000);
+  return st;
+}
+
+function closeGpuDialog() {
+  $('#gpu-dialog').classList.add('hidden');
+  const done = gpuDialogDone;
+  gpuDialogDone = null;
+  done?.();
+}
+
+/** 第一次開啟、而且真的能用 N 卡加速時才問；回答過（不論是或否）就不再自動跳出。 */
+async function maybeAskGpu() {
+  if (!state.serverInfo?.isLocal) return;
+  const st = await api.gpuStatus().catch(() => null);
+  if (!st || !st.available || st.installed || st.promptAnswered) return;
+  if (st.state !== 'idle' && st.state !== 'error') return;
+  $('#gpu-dialog-body').innerHTML = gpuHtml(st, true);
+  $('#gpu-dialog').classList.remove('hidden');
+  await new Promise((resolve) => { gpuDialogDone = resolve; });
+}
+
+async function onGpuAction(e) {
+  const btn = e.target.closest('button[data-gpu]');
+  if (!btn) return;
+  const act = btn.dataset.gpu;
+
+  if (act === 'skip' || act === 'start') {
+    api.saveServerSettings({ gpuPromptAnswered: true }).catch(() => {});
+  }
+  if (act === 'skip' || act === 'close') {
+    closeGpuDialog();
+    return;
+  }
+  if (act === 'remove' && !confirm('要移除 NVIDIA 加速包、改回用 CPU 分離嗎？\n重新啟動程式後生效。')) return;
+  if (act === 'restart') {
+    if (state.singing && !confirm('正在演唱中，重新啟動會結束這次演唱。確定嗎？')) return;
+    btn.disabled = true;
+    btn.textContent = '重新啟動中…';
+    try {
+      await api.restartApp();
+      location.reload();
+    } catch (err) {
+      alert(err.message);
+      btn.disabled = false;
+      btn.textContent = '立即重新啟動';
+    }
+    return;
+  }
+
+  btn.disabled = true;
+  try {
+    await api.gpuAction(act);
+  } catch (err) {
+    alert(err.message);
+  }
+  await renderGpu();
+}
+
+$('#gpu-dialog').addEventListener('click', onGpuAction);
+$('#gpu-settings').addEventListener('click', onGpuAction);
+
 // ── 第一次使用導覽 ──────────────────────────────────────────
 
 async function maybeStartTour(force = false) {
@@ -1732,7 +1863,7 @@ $$('button[data-goto]').forEach((btn) => {
     stopPreview();
     if (target === 'connect') { renderConnect(); show('connect'); }
     else if (target === 'calibrate') openCalibrate();
-    else if (target === 'settings') { renderProfiles(); renderServerInfo(); renderCacheInfo(); show('settings'); }
+    else if (target === 'settings') { renderProfiles(); renderServerInfo(); renderCacheInfo(); renderGpu(); show('settings'); }
     else { renderLibrary(); show('library'); }
   });
 });
@@ -1792,5 +1923,7 @@ function showQuitNotice() {
   // 關閉程式同理：從手機按沒有意義，伺服器那邊也會擋掉
   $('#nav-quit').classList.toggle('hidden', !state.serverInfo?.isLocal);
 
+  // 先問顯示卡加速（下載要很久，越早開始越好），回答完才進導覽
+  await maybeAskGpu();
   maybeStartTour();
 })();
