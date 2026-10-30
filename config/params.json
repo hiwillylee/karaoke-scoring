@@ -1,0 +1,59 @@
+{
+  "_comment": "前端 (js/techniques.js) 與後端 (analyze.py) 共用的判準，改這裡兩邊同時生效",
+  "pitch": {
+    "minConfidence": 0.75,
+    "minNoteDurationMs": 80,
+    "maxDeviationSemitones": 0.5,
+    "maxGapMs": 60,
+    "fminHz": 65.0,
+    "fmaxHz": 1050.0,
+    "hopMs": 16,
+    "frameLength": 1024,
+    "glideMergeMs": 200,
+    "glideMergeSemitones": 2.0,
+    "minLevelDb": -24
+  },
+  "vibrato": {
+    "minNoteMs": 500,
+    "minRateHz": 4.5,
+    "maxRateHz": 7.5,
+    "minDepthCents": 20,
+    "maxDepthCents": 100,
+    "minCycles": 3
+  },
+  "shakuri": {
+    "windowMs": 200,
+    "minRiseCents": 60,
+    "targetBandCents": 50
+  },
+  "fall": {
+    "windowMs": 150,
+    "minDropCents": 80
+  },
+  "scoring": {
+    "weights": { "pitch": 0.60, "rhythm": 0.15, "stability": 0.15, "technique": 0.10 },
+    "pitchPerfectCents": 30,
+    "pitchZeroCents": 180,
+    "pitchCurve": 1.5,
+    "pitchOnsetGuardMs": 55,
+    "refTargetMaxOffsetCents": 100,
+    "rhythmPerfectMs": 40,
+    "rhythmZeroMs": 260,
+    "rhythmCurve": 1.3,
+    "rhythmExtraPenalty": 0.35,
+    "stabilityPerfectCents": 25,
+    "stabilityZeroCents": 110,
+    "stabilityCurve": 1.3,
+    "stabilityOutlierCents": 400,
+    "octaveRepairMaxMs": 300,
+    "sustainedNoteMs": 400,
+    "techniqueTargetCount": 18,
+    "techniqueMinTarget": 8,
+    "unmatchedTechniqueCap": 0.5,
+    "originalMatchBonus": 1.0,
+    "completionFullMark": 0.9,
+    "completionFloor": 0.5,
+    "pivotScore": 85,
+    "pivotStretch": 1.5
+  }
+}

@@ -1,0 +1,21 @@
+# 環境與快取
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
+
+# 打包產物
+build/
+build-win/
+release/
+*.dmg
+*.exe
+
+# 執行期資料（自簽憑證含私鑰、使用者曲庫與暫存）
+certs/
+library/
+work/
+
+# 備份檔
+*.bak

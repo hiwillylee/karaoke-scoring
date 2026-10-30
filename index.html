@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>カラオケ 精密採點</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2307070d'/%3E%3Ctext x='16' y='23' font-size='19' text-anchor='middle' fill='%2300e5ff'%3E%E2%99%AA%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="jp">カラオケ</span><span class="zh">精密採點</span></div>
+  <nav>
+    <button class="ghost hidden" id="nav-connect" data-goto="connect">📱 手機連線</button>
+    <button class="ghost" data-goto="library">曲庫</button>
+    <button class="ghost" data-goto="calibrate">延遲校準</button>
+    <button class="ghost" data-goto="settings">設定</button>
+    <button class="ghost danger hidden" id="nav-quit" title="關閉這台電腦上的唱歌評分程式">⏻ 關閉程式</button>
+  </nav>
+</header>
+
+<nav class="bottom-nav">
+  <button data-goto="library">曲庫</button>
+  <button data-goto="calibrate">校準</button>
+  <button data-goto="settings">設定</button>
+</nav>
+
+<!-- ── 曲庫 ───────────────────────────────────────────────── -->
+<section id="screen-library" class="screen active">
+  <div class="search-row" id="dropzone">
+    <div class="search-field">
+      <span class="search-icon">⌕</span>
+      <input type="search" id="search-input" autocomplete="off" spellcheck="false"
+             placeholder="搜尋曲庫，或貼上 YouTube／YouTube Music／Bilibili 網址">
+      <button class="search-clear hidden" id="search-clear" title="清除">✕</button>
+    </div>
+    <button class="upload-btn" id="upload-btn" title="上傳本機音檔">＋</button>
+    <input type="file" id="file-input" accept="audio/*" hidden>
+  </div>
+  <div id="search-status" class="search-status hidden"></div>
+  <div id="backend-warning" class="banner warn hidden"></div>
+  <div id="song-list" class="song-grid"></div>
+</section>
+
+<!-- ── 分析中 ─────────────────────────────────────────────── -->
+<section id="screen-analyze" class="screen center">
+  <h2 id="analyze-title">分析中</h2>
+  <div class="progress"><div class="progress-bar" id="analyze-bar"></div></div>
+  <p class="muted" id="analyze-message">準備中…</p>
+  <ol class="stages">
+    <li data-stage="separate">音源分離（人聲／伴奏）</li>
+    <li data-stage="pitch">抽取原唱音高</li>
+    <li data-stage="technique">標記原唱技巧</li>
+  </ol>
+  <p class="hint">第一次執行會下載分離模型，需要多等一會兒。</p>
+</section>
+
+<!-- ── 譜面確認 ───────────────────────────────────────────── -->
+<section id="screen-chart" class="screen">
+  <h2>譜面確認 <span class="muted small" id="chart-song-name"></span></h2>
+  <p class="muted">播放並拖曳時間軸，確認音程條的走勢跟旋律對得上。對不上時到「進階」調整。</p>
+  <canvas id="chart-preview" class="preview"></canvas>
+  <canvas id="chart-overview" class="overview" title="全曲總覽：點一下或拖曳可跳到該處"></canvas>
+  <div class="timeline-bar">
+    <button id="preview-back5" class="ghost tiny" title="往前 5 秒">《 5秒</button>
+    <button id="preview-play" class="primary tiny">播放</button>
+    <button id="preview-fwd5" class="ghost tiny" title="往後 5 秒">5秒 》</button>
+    <button id="preview-vocal" class="ghost tiny on" title="原唱人聲">🎤 原唱</button>
+    <button id="preview-piano" class="ghost tiny" title="用鋼琴彈出抽到的譜，跟原唱比對">🎹 鋼琴</button>
+    <span class="time" id="preview-time">0:00 / 0:00</span>
+    <span class="stat" id="chart-stats"></span>
+  </div>
+  <p class="hint">
+    上方音程條可左右拖曳細看；下方細長條是全曲總覽，點一下就能跳到那一段。<br>
+    <strong>「🎹 鋼琴」會把抽到的譜彈出來</strong>——關掉「🎤 原唱」交替聽，
+    鋼琴跟原唱差一個八度就是抽錯了，按下方的「✎ 編輯譜面」改掉。
+  </p>
+
+  <details class="advanced">
+    <summary>進階</summary>
+    <div class="controls">
+      <label>八度位移
+        <input type="range" id="octave-slider" min="-1" max="1" step="1" value="0">
+        <output id="octave-value">0</output>
+      </label>
+      <label>偵測靈敏度
+        <input type="range" id="sens-slider" min="0.5" max="0.95" step="0.05" value="0.75">
+        <output id="sens-value">0.75</output>
+      </label>
+      <label>音量門檻
+        <input type="range" id="level-slider" min="-40" max="-12" step="2" value="-24">
+        <output id="level-value">-24 dB</output>
+      </label>
+    </div>
+    <p class="muted small">
+        整首高／低一個八度時調「八度位移」；旋律斷斷續續時把「偵測靈敏度」調低；
+        <strong>看得到音符卻聽不到聲音</strong>時把「音量門檻」往右調，可濾掉分離後殘留的伴奏與殘響。
+      </p>
+
+  </details>
+
+  <div class="row">
+    <button id="chart-confirm" class="primary">確認，開始唱</button>
+    <button id="chart-edit" class="ghost">✎ 編輯譜面</button>
+    <button id="chart-back" class="ghost">回曲庫</button>
+  </div>
+</section>
+
+<!-- ── 編輯譜面 ───────────────────────────────────────────── -->
+<section id="screen-edit" class="screen">
+  <h2>編輯譜面 <span class="muted small" id="edit-song-name"></span></h2>
+  <p class="muted">
+    抽出來的譜不會完美。點一下選音符，拖曳移動，拖兩端改長度，
+    <kbd>Delete</kbd> 刪除，<kbd>Alt</kbd>＋點空白處或雙擊新增。<br>
+    上方的<strong>時間尺</strong>可以點或拖曳決定從哪裡播，也可以直接抓住白色播放線拖。
+  </p>
+  <canvas id="edit-roll" class="roll"></canvas>
+
+  <div class="timeline-bar">
+    <button id="edit-play" class="primary tiny">播放</button>
+    <button id="edit-vocal" class="ghost tiny on" title="原唱人聲">🎤 原唱</button>
+    <button id="edit-piano" class="ghost tiny on" title="用鋼琴彈出目前的譜">🎹 鋼琴</button>
+    <span class="time" id="edit-time">0:00 / 0:00</span>
+    <span class="stat" id="edit-sel">未選取</span>
+  </div>
+
+  <div class="controls">
+    <button id="edit-oct-up" class="ghost tiny">+1 八度</button>
+    <button id="edit-oct-down" class="ghost tiny">−1 八度</button>
+    <button id="edit-semi-up" class="ghost tiny">+1 半音</button>
+    <button id="edit-semi-down" class="ghost tiny">−1 半音</button>
+    <button id="edit-longer" class="ghost tiny">變長</button>
+    <button id="edit-shorter" class="ghost tiny">變短</button>
+    <button id="edit-delete" class="ghost tiny danger">刪除</button>
+    <button id="edit-undo" class="ghost tiny">↶ 復原</button>
+    <button id="edit-redo" class="ghost tiny">↷ 重做</button>
+  </div>
+  <p class="hint">
+    快捷鍵：<kbd>↑</kbd><kbd>↓</kbd> 半音、<kbd>⇧↑</kbd><kbd>⇧↓</kbd> 八度、
+    <kbd>←</kbd><kbd>→</kbd> 前後移動、<kbd>⌘Z</kbd> 復原、<kbd>⌘A</kbd> 全選、
+    <kbd>空白鍵</kbd> 播放／暫停。滾輪橫向捲動，<kbd>⌘</kbd>＋滾輪縮放。
+  </p>
+
+  <div class="row">
+    <button id="edit-save" class="primary">儲存並返回</button>
+    <button id="edit-revert" class="ghost">捨棄所有編輯，重新從音訊產生</button>
+    <button id="edit-cancel" class="ghost">取消</button>
+  </div>
+  <p class="muted small" id="edit-status"></p>
+</section>
+
+<!-- ── 演唱 ───────────────────────────────────────────────── -->
+<section id="screen-sing" class="screen sing">
+  <div class="sing-head">
+    <div class="sing-row title-row">
+      <div class="sing-title" id="sing-song-name"></div>
+      <div class="live-score"><span id="live-score">0</span><small>分</small></div>
+    </div>
+    <div class="sing-row controls-row">
+      <button class="ghost tiny" id="guide-toggle" title="播放原唱當導唱。用喇叭時原唱會被麥克風收到，建議戴耳機">原唱 關</button>
+      <div class="key-control">
+        <button class="ghost tiny" id="key-down">♭</button>
+        <span id="key-value">原調</span>
+        <button class="ghost tiny" id="key-up">♯</button>
+      </div>
+    </div>
+  </div>
+  <div class="progress thin"><div class="progress-bar" id="sing-bar"></div></div>
+  <div class="stage-wrap">
+    <canvas id="stage"></canvas>
+    <div id="countdown" class="countdown hidden"></div>
+    <div id="tech-popup" class="tech-popup"><canvas width="132" height="66"></canvas></div>
+  </div>
+  <div class="sing-foot">
+    <div id="pitch-hint" class="pitch-hint">—</div>
+    <div class="row">
+      <button id="sing-toggle" class="primary">暫停</button>
+      <button id="sing-stop" class="ghost">結束並計分</button>
+    </div>
+    <div class="muted small" id="latency-note"></div>
+  </div>
+</section>
+
+<!-- ── 結算 ───────────────────────────────────────────────── -->
+<section id="screen-result" class="screen">
+  <div class="result-head">
+    <canvas id="particles" class="particles"></canvas>
+    <div class="grade" id="result-grade">—</div>
+    <div class="big-score"><span id="result-score">0.0</span><small>分</small></div>
+    <div class="comment" id="result-comment"></div>
+  </div>
+  <div class="result-grid">
+    <div class="card">
+      <h3>各項評分</h3>
+      <canvas id="radar" class="radar"></canvas>
+    </div>
+    <div class="card">
+      <h3>技巧</h3>
+      <ul id="tech-list" class="tech-list"></ul>
+      <div class="muted small" id="tech-note"></div>
+      <h3 class="mt">紀錄</h3>
+      <div class="muted small" id="best-note"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>整曲音程對照<span class="legend"><i class="ref"></i>參考譜<i class="usr"></i>實唱</span></h3>
+    <canvas id="compare" class="compare"></canvas>
+  </div>
+  <div class="row">
+    <button id="result-retry" class="primary">再唱一次</button>
+    <button id="result-back" class="ghost">回曲庫</button>
+  </div>
+</section>
+
+<!-- ── 延遲校準 ───────────────────────────────────────────── -->
+<section id="screen-calibrate" class="screen center">
+  <h2>延遲校準</h2>
+  <p class="muted">
+    麥克風收到的聲音會比實際晚一點。播放節拍後<strong>跟著拍手</strong>，
+    系統會量出這段延遲並記住這組裝置的設定。
+  </p>
+  <div class="calib-devices">
+    <label>麥克風
+      <select id="calib-mic"></select>
+    </label>
+    <label>輸出裝置
+      <select id="calib-out"></select>
+    </label>
+  </div>
+  <p class="hint">校準時請用<strong>外放</strong>並用力拍手；正式演唱時再戴上耳機。</p>
+  <div class="beat-dots" id="beat-dots"></div>
+  <p class="muted" id="calib-status">按下開始後會先有 8 拍前導，接著跟著拍 8 下。</p>
+  <div class="row">
+    <button id="calib-start" class="primary">開始校準</button>
+    <button id="calib-back" class="ghost">返回</button>
+  </div>
+  <div id="calib-result" class="calib-result hidden"></div>
+</section>
+
+<!-- ── 手機連線（只在這台電腦上顯示） ───────────────────────── -->
+<section id="screen-connect" class="screen">
+  <h2>手機連線</h2>
+  <p class="muted">用手機相機掃下面的 QR，就能連上這台電腦的曲庫一起唱。</p>
+
+  <div class="connect-grid">
+    <div class="card qr-card">
+      <h3>同一個 Wi-Fi</h3>
+      <div class="qr-box" id="qr-lan"><div class="qr-empty">讀取中…</div></div>
+      <div class="qr-url" id="qr-lan-url"></div>
+      <p class="muted small">
+        手機要跟這台電腦連同一個 Wi-Fi。第一次連會出現憑證警告，
+        選「進階 → 繼續前往」即可——這是自簽憑證的正常現象。
+      </p>
+    </div>
+
+    <div class="card qr-card">
+      <h3>臨時公開網址</h3>
+      <div class="qr-box" id="qr-tunnel"><div class="qr-empty">尚未建立</div></div>
+      <div class="qr-url" id="qr-tunnel-url"></div>
+      <div class="row">
+        <button class="primary tiny" id="tunnel-toggle">建立公開網址</button>
+      </div>
+      <p class="muted small" id="tunnel-note">
+        透過 Cloudflare 取得一組臨時網址，<strong>不在同一個 Wi-Fi 也能連</strong>，
+        而且是有效憑證、不會有警告。關掉就失效。
+      </p>
+      <p class="warn-note">
+        ⚠ 這個網址<strong>沒有密碼</strong>，拿到的人就能瀏覽曲庫、加歌、刪歌。
+        只分享給你信任的人，用完請關掉。
+      </p>
+      <label class="slider-row">
+        <input type="checkbox" id="tunnel-on-start">
+        <span>每次啟動時自動建立</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="row"><button class="ghost" id="connect-back">返回</button></div>
+</section>
+
+<!-- ── 設定 ───────────────────────────────────────────────── -->
+<section id="screen-settings" class="screen">
+  <h2>設定</h2>
+  <div class="card">
+    <h3>連線與硬體</h3>
+    <dl id="server-info" class="info-grid muted small">讀取中…</dl>
+  </div>
+  <div class="card">
+    <h3>延遲設定檔</h3>
+    <p class="muted small">每一組「麥克風 × 輸出裝置」各自記一份，換耳機不用重測。</p>
+    <ul id="profile-list" class="profile-list"></ul>
+  </div>
+  <div class="card">
+    <h3>手動微調</h3>
+    <label class="slider-row">
+      <span>目前裝置的延遲</span>
+      <input type="range" id="manual-latency" min="-200" max="400" step="5" value="0">
+      <output id="manual-latency-value">0 ms</output>
+    </label>
+    <p class="muted small">覺得判定偏早就往右調，偏晚就往左調。</p>
+  </div>
+  <div class="card">
+    <h3>本機音軌快取</h3>
+    <p class="muted small">
+      曲庫存在電腦上，這台裝置唱過的歌會把音軌留一份在本機，重唱時就不用再抓。
+    </p>
+    <div class="slider-row">
+      <span id="cache-info" class="muted small">計算中…</span>
+      <button class="ghost tiny" id="cache-clear">清除快取</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>麥克風靈敏度</h3>
+    <label class="slider-row">
+      <span>靜音門檻</span>
+      <input type="range" id="silence-slider" min="0.002" max="0.05" step="0.002" value="0.008">
+      <output id="silence-value">0.008</output>
+    </label>
+    <p class="muted small">環境吵雜時調高，避免雜音被當成歌聲。</p>
+  </div>
+  <div class="card">
+    <h3>使用說明</h3>
+    <p class="muted small">重新看一次各功能在哪裡的簡短導覽。</p>
+    <div class="row"><button class="ghost tiny" id="tour-restart">重看使用說明</button></div>
+  </div>
+  <div class="row"><button id="settings-back" class="ghost">返回</button></div>
+</section>
+
+<!-- ── 第一次使用導覽 ─────────────────────────────────────── -->
+<div id="tour" class="tour hidden">
+  <!-- 四塊遮罩圍出中間的洞。不用超大 box-shadow 挖洞：那個陰影矩形
+       接近 20000x20000，Chrome 在合成層上會處理成整片塗滿，框內也一起
+       變暗，Safari 則正常——同一份 CSS 兩個瀏覽器結果不同。 -->
+  <div class="tour-mask" id="tour-mask">
+    <div data-side="top"></div><div data-side="right"></div>
+    <div data-side="bottom"></div><div data-side="left"></div>
+  </div>
+  <div class="tour-ring" id="tour-ring"></div>
+  <div class="tour-card" id="tour-card">
+    <div class="tour-step" id="tour-step"></div>
+    <h3 id="tour-title"></h3>
+    <p id="tour-body"></p>
+    <div class="tour-foot">
+      <div class="tour-dots" id="tour-dots"></div>
+      <div class="row">
+        <button class="ghost tiny" id="tour-skip">略過</button>
+        <button class="primary tiny" id="tour-next">下一步</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

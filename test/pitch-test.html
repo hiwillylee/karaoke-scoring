@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>DSP 驗證 — カラオケ精密採點</title>
+<style>
+  body { background:#07070d; color:#e9ecf5; font-family:"Noto Sans TC",system-ui,sans-serif; padding:28px; }
+  h1 { font-size:20px; color:#00e5ff; }
+  h2 { font-size:14px; color:#ff2bd6; margin-top:26px; letter-spacing:.1em; }
+  .case { padding:5px 0; font-size:13px; font-family:ui-monospace,monospace; }
+  .ok::before { content:"✓ "; color:#4ade80; }
+  .bad::before { content:"✗ "; color:#ff7a8a; }
+  .bad { color:#ff7a8a; }
+  .detail { color:rgba(233,236,245,.45); }
+  #summary { margin-top:30px; padding:16px 20px; border-radius:12px; border:1px solid rgba(255,255,255,.12);
+             font-size:18px; font-weight:700; }
+  #summary.pass { color:#4ade80; border-color:rgba(74,222,128,.4); }
+  #summary.fail { color:#ff7a8a; border-color:rgba(255,122,138,.4); }
+</style>
+</head>
+<body>
+<h1>DSP 驗證</h1>
+<p class="detail">以合成訊號驗證音高偵測、note 切段、升降調與延遲校準演算法。</p>
+<div id="out"></div>
+<div id="summary">執行中…</div>
+
+<script type="module">
+import { Yin, hzToMidi, midiToHz, fixOctaveJumps, framesToNotes, mergeGlideNotes, resample, PitchSmoother, prepareFrames, levelFloor } from '../js/dsp.js';
+import { analyzeNote, detectTechniques, PARAMS, loadParams } from '../js/techniques.js';
+import { shiftOffline } from '../js/pitchshift.js';
+import { detectOnsets, matchOffsets } from '../js/calibrate.js';
+import { LiveScorer } from '../js/score.js';
+
+const out = document.getElementById('out');
+let pass = 0, fail = 0;
+
+function section(title) {
+  const h = document.createElement('h2');
+  h.textContent = title;
+  out.appendChild(h);
+}
+function check(name, ok, detail = '') {
+  ok ? pass++ : fail++;
+  const d = document.createElement('div');
+  d.className = `case ${ok ? 'ok' : 'bad'}`;
+  d.innerHTML = `${name}${detail ? ` <span class="detail">→ ${detail}</span>` : ''}`;
+  out.appendChild(d);
+}
+
+const SR = 44100;
+
+function sine(hz, seconds, sr = SR, harmonics = true) {
+  const n = Math.floor(sr * seconds);
+  const buf = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i / sr;
+    buf[i] = Math.sin(2 * Math.PI * hz * t) * 0.6
+      + (harmonics ? Math.sin(4 * Math.PI * hz * t) * 0.2 + Math.sin(6 * Math.PI * hz * t) * 0.1 : 0);
+  }
+  return buf;
+}
+
+/** 用 YIN 量一段訊號的主頻。 */
+function measure(buf, sr, frame = 2048) {
+  const yin = new Yin(sr, frame, 0.15);
+  const readings = [];
+  for (let off = frame; off + frame < buf.length - frame; off += frame) {
+    const { hz, confidence } = yin.detect(buf.subarray(off, off + frame));
+    if (hz > 0 && confidence > 0.5) readings.push(hz);
+  }
+  readings.sort((a, b) => a - b);
+  return readings.length ? readings[readings.length >> 1] : 0;
+}
+
+const cents = (a, b) => Math.abs(1200 * Math.log2(a / b));
+
+await loadParams();
+
+// ── 1. YIN 準確度 ──────────────────────────────────────────
+section('1. YIN 音高偵測準確度');
+for (const [name, hz] of [['A2', 110], ['A4', 440], ['C5', 523.25]]) {
+  const got = measure(sine(hz, 0.6), SR, 2048);
+  check(`${name} (${hz}Hz) 誤差 < 5 cents`, got > 0 && cents(got, hz) < 5,
+        `測得 ${got.toFixed(2)}Hz，誤差 ${cents(got, hz).toFixed(2)} cents`);
+}
+// 麥克風實際使用的設定：16kHz / 1024
+for (const [name, hz] of [['A2', 110], ['A4', 440]]) {
+  const down = resample(sine(hz, 0.6), SR, 16000);
+  const got = measure(down, 16000, 1024);
+  check(`麥克風設定 16k/1024：${name} 誤差 < 5 cents`, got > 0 && cents(got, hz) < 5,
+        `測得 ${got.toFixed(2)}Hz，誤差 ${cents(got, hz).toFixed(2)} cents`);
+}
+
+// 掃頻
+section('2. 掃頻追蹤');
+{
+  const n = SR * 1.0;
+  const buf = new Float32Array(n);
+  let phase = 0;
+  for (let i = 0; i < n; i++) {
+    const f = 200 + (400 - 200) * (i / n);
+    phase += (2 * Math.PI * f) / SR;
+    buf[i] = Math.sin(phase) * 0.7;
+  }
+  const yin = new Yin(SR, 2048, 0.15);
+  const errs = [];
+  for (let off = 0; off + 2048 < n; off += 1024) {
+    const mid = off + 1024;
+    const expected = 200 + 200 * (mid / n);
+    const { hz, confidence } = yin.detect(buf.subarray(off, off + 2048));
+    if (hz > 0 && confidence > 0.5) errs.push(cents(hz, expected));
+  }
+  const worst = Math.max(...errs);
+  check('掃頻期間誤差 < 30 cents', errs.length > 10 && worst < 30,
+        `${errs.length} 個取樣點，最大誤差 ${worst.toFixed(1)} cents`);
+}
+
+// ── 3. 八度修正與 note 切段 ────────────────────────────────
+section('3. 後處理');
+{
+  const fixed = fixOctaveJumps(Float32Array.from([60, 60.1, 72.05, 60, 59.9, 48.1, 60]));
+  const worst = Math.max(...Array.from(fixed, (v) => Math.abs(v - 60)));
+  check('八度離群值被拉回', worst < 0.3, `最大偏差 ${worst.toFixed(2)} 半音`);
+}
+{
+  // 真的飆上高八度並唱一陣子，不可以被當成誤判壓回去
+  const seq = [60, 60.1, 59.9, 60, ...Array(20).fill(72), 72.1, 71.9];
+  const fixed = fixOctaveJumps(Float32Array.from(seq));
+  const high = Array.from(fixed).slice(4);
+  const worst = Math.max(...high.map((v) => Math.abs(v - 72)));
+  check('真的跳高八度不被壓回低八度', worst < 0.3,
+        `高音段最大偏差 ${worst.toFixed(2)} 半音`);
+}
+{
+  // 三段固定音，中間有空隙
+  const hop = 16;
+  const frames = [];
+  let t = 0;
+  for (const midi of [60, 64, 67]) {
+    for (let i = 0; i < 40; i++) frames.push({ t: t += hop, midi, conf: 0.9, rms: 0.2 });
+    for (let i = 0; i < 10; i++) frames.push({ t: t += hop, midi: 0, conf: 0, rms: 0 });
+  }
+  const notes = framesToNotes(frames, PARAMS.pitch);
+  check('三段固定音切出 3 個 note', notes.length === 3, `實得 ${notes.length}`);
+  check('切出的音高正確',
+        notes.length === 3 && notes.every((n, i) => Math.abs(n.midi - [60, 64, 67][i]) < 0.05));
+}
+{
+  // 起音滑音造成的短碎音應被併回主音
+  const merged = mergeGlideNotes([
+    { startMs: 0, endMs: 150, midi: 63.9 },
+    { startMs: 170, endMs: 1000, midi: 65 },
+  ], PARAMS.pitch);
+  check('起音滑音碎片被併回主音', merged.length === 1 && Math.abs(merged[0].midi - 65) < 0.01,
+        `${merged.length} 個 note，音高 ${merged[0].midi}`);
+  const kept = mergeGlideNotes([
+    { startMs: 0, endMs: 800, midi: 60 },
+    { startMs: 830, endMs: 980, midi: 62 },
+    { startMs: 1000, endMs: 1800, midi: 64 },
+  ], PARAMS.pitch);
+  check('被前後音夾住的短音不會被誤併', kept.length === 3, `實得 ${kept.length}`);
+}
+
+{
+  // 「有音符卻沒聲音」：分離後殘留的伴奏／殘響雖然幾乎聽不見，
+  // 但仍有週期性，音高偵測照樣算得出穩定的音。
+  const hop = 16;
+  const frames = [];
+  let t = 0;
+  const push = (midi, rms, count) => {
+    for (let i = 0; i < count; i++) frames.push({ t: (t += hop), midi, conf: midi ? 0.9 : 0, rms });
+  };
+  push(60, 0.30, 40);      // 真的有唱
+  push(0, 0, 12);
+  push(48, 0.004, 40);     // 幽靈：約 -37dB，且剛好低八度
+  push(0, 0, 12);
+  push(64, 0.30, 40);      // 真的有唱
+
+  const withGate = framesToNotes(frames, { ...PARAMS.pitch });
+  const pitches = withGate.map((n) => Math.round(n.midi));
+  check('微弱殘留不會變成音符', !pitches.includes(48) && withGate.length === 2,
+        `切出 ${withGate.length} 個音：${pitches}`);
+  check('幽靈不會把後面真實音的八度帶偏', pitches.includes(64),
+        `音高 ${pitches}`);
+
+  const loose = framesToNotes(frames, { ...PARAMS.pitch, minLevelDb: -60 });
+  check('把門檻放寬後幽靈就會出現（證明是門檻在起作用）',
+        loose.length > withGate.length, `放寬後 ${loose.length} 個音`);
+
+  const floor = levelFloor(frames, -24);
+  check('音量門檻是相對於這段訊號自己的音量', floor > 0.004 && floor < 0.3,
+        `門檻 ${floor.toFixed(4)}（訊號 0.30、殘留 0.004）`);
+}
+
+// ── 4. 技巧偵測 ────────────────────────────────────────────
+section('4. 技巧偵測');
+{
+  const hop = 16;
+  const n = 90; // 1.44 秒
+  const vib = Array.from({ length: n }, (_, i) => 35 * Math.sin(2 * Math.PI * 5.5 * (i * hop) / 1000));
+  const res = analyzeNote(vib, [], [], n * hop, hop);
+  check('ビブラート 被偵測到', !!res.vibrato,
+        res.vibrato ? `${res.vibrato.rateHz}Hz / ${res.vibrato.depthCents} cents` : '未偵測');
+  check('顫音速度接近 5.5Hz', !!res.vibrato && Math.abs(res.vibrato.rateHz - 5.5) < 1.0);
+
+  const flat = new Array(n).fill(0).map(() => (Math.random() - 0.5) * 6);
+  check('平穩長音不被誤判為顫音', !analyzeNote(flat, [], [], n * hop, hop).vibrato);
+
+  const core = new Array(60).fill(0);
+  const onset = [-130, -110, -80, -45, -15, -4, 0, 2, -1, 0, 1, 0];
+  check('しゃくり 被偵測到', analyzeNote(core, onset, [], 960, hop).shakuri);
+
+  const tail = [0, -2, 1, -20, -60, -110, -160, -190];
+  check('フォール 被偵測到', analyzeNote(core, [], tail, 960, hop).fall);
+}
+
+// ── 5. 升降調：變調不變速 ──────────────────────────────────
+section('5. 升降調');
+{
+  const src = sine(440, 1.5, SR, false);
+  for (const semi of [2, -3, 5]) {
+    const shifted = shiftOffline(src, semi);
+    const expected = 440 * Math.pow(2, semi / 12);
+    const got = measure(shifted, SR, 2048);
+    check(`${semi > 0 ? '+' : ''}${semi} 半音後主頻正確（誤差 < 20 cents）`,
+          got > 0 && cents(got, expected) < 20,
+          `期望 ${expected.toFixed(2)}Hz，測得 ${got.toFixed(2)}Hz`);
+    check(`${semi > 0 ? '+' : ''}${semi} 半音後長度不變`, shifted.length === src.length,
+          `${shifted.length} vs ${src.length} 樣本`);
+  }
+}
+
+// ── 6. 延遲校準演算法 ──────────────────────────────────────
+section('6. 延遲校準');
+{
+  const sr = 44100;
+  const beatMs = 600;
+  const beats = 8;
+  const trueDelay = 120;
+  const total = Math.floor((sr * (beats * beatMs + 800)) / 1000);
+  const pcm = new Float32Array(total);
+  // 合成拍手：短促脈衝 + 少量背景雜訊
+  for (let i = 0; i < total; i++) pcm[i] = (Math.random() - 0.5) * 0.01;
+  const beatTimes = [];
+  for (let b = 0; b < beats; b++) {
+    const at = b * beatMs;
+    beatTimes.push(at);
+    const jitter = (Math.random() - 0.5) * 24;   // 人拍手本來就有誤差
+    const start = Math.floor((sr * (at + trueDelay + jitter)) / 1000);
+    for (let i = 0; i < sr * 0.05; i++) {
+      if (start + i >= total) break;
+      pcm[start + i] += Math.exp(-i / (sr * 0.006)) * (Math.random() - 0.5) * 1.6;
+    }
+  }
+  const onsets = detectOnsets(pcm, sr);
+  const { accepted, medianMs } = matchOffsets(onsets, beatTimes);
+  check('偵測到的拍手數正確', Math.abs(onsets.length - beats) <= 1,
+        `偵測 ${onsets.length} 個 / 實際 ${beats} 個`);
+  check('量出的延遲為 120 ± 20ms', Math.abs(medianMs - trueDelay) <= 20,
+        `測得 ${medianMs.toFixed(1)}ms（${accepted.length} 拍有效）`);
+}
+
+// ── 7. 評分引擎（不需要麥克風） ─────────────────────────────
+section('7. 評分引擎');
+{
+  const hop = 16;
+  // 四個各 1 秒的音，音與音之間空 0.2 秒
+  const targets = [60, 62, 64, 67];
+  const notes = [];
+  const midiArr = [], confArr = [], rmsArr = [];
+  let idx = 0;
+  for (const m of targets) {
+    const start = idx * hop;
+    for (let i = 0; i < 62; i++) { midiArr.push(m); confArr.push(0.95); rmsArr.push(0.2); idx++; }
+    const end = (idx - 1) * hop;
+    notes.push({ startMs: start, endMs: end, midi: m });
+    for (let i = 0; i < 13; i++) { midiArr.push(0); confArr.push(0); rmsArr.push(0); idx++; }
+  }
+  const chart = {
+    hopMs: hop, durationMs: idx * hop,
+    frames: { midi: midiArr, conf: confArr, rms: rmsArr },
+    notes, techniques: [],
+  };
+
+  /** 依 chart 產生使用者音框；transform 可改變音高或讓某些段落不發聲。 */
+  function sing(chart, transform) {
+    const scorer = new LiveScorer(chart, { keyShift: 0 });
+    for (let i = 0; i < chart.frames.midi.length; i++) {
+      const songMs = i * chart.hopMs;
+      const ref = chart.frames.midi[i];
+      const midi = transform(ref, songMs);
+      scorer.addFrame({ t: songMs / 1000, songMs, midi: midi || 0, conf: midi ? 0.95 : 0, rms: midi ? 0.2 : 0 });
+    }
+    return scorer.finish();
+  }
+
+  const perfect = sing(chart, (ref) => ref);
+  check('照譜唱：音程 ≥ 99', perfect.breakdown.pitch >= 99, `${perfect.breakdown.pitch}`);
+  check('照譜唱：完唱度 100', perfect.breakdown.completion >= 99, `${perfect.breakdown.completion}`);
+  check('照譜唱：節奏 ≥ 95', perfect.breakdown.rhythm >= 95, `${perfect.breakdown.rhythm}`);
+  check('照譜唱：總分 ≥ 85', perfect.total >= 85, `${perfect.total} 分（${perfect.grade}）`);
+
+  const octaveUp = sing(chart, (ref) => (ref ? ref + 12 : 0));
+  check('高八度唱不扣分（八度對齊生效）',
+        Math.abs(octaveUp.breakdown.pitch - perfect.breakdown.pitch) < 1,
+        `${octaveUp.breakdown.pitch} vs ${perfect.breakdown.pitch}，位移 ${octaveUp.octaveOffset}`);
+
+  const flat = sing(chart, (ref) => (ref ? ref - 1 : 0));
+  check('整首低半音：音程明顯下降但不歸零',
+        flat.breakdown.pitch < perfect.breakdown.pitch - 20 && flat.breakdown.pitch > 0,
+        `${flat.breakdown.pitch}`);
+
+  const half = sing(chart, (ref, t) => (t < chart.durationMs / 2 ? ref : 0));
+  check('只唱一半：完唱度約 50%', Math.abs(half.breakdown.completion - 50) < 12,
+        `${half.breakdown.completion}%`);
+  check('只唱一半：總分明顯低於唱完', half.total < perfect.total - 20,
+        `${half.total} vs ${perfect.total}`);
+
+  // 安定性門檻放寬後（見 config/params.json 的調整說明），輕微的自然晃音
+  // 不該再被扣分——這裡改用明顯更大的晃動（整整一個半音、1Hz）代表真的
+  // 唱不穩，才足以測出「安定性確實會反映抖不抖」這件事。
+  const wobbly = sing(chart, (ref, t) => (ref ? ref + 1.0 * Math.sin(2 * Math.PI * 1.0 * t / 1000) : 0));
+  check('明顯的晃音使安定性下降', wobbly.breakdown.stability < perfect.breakdown.stability - 20,
+        `${wobbly.breakdown.stability} vs ${perfect.breakdown.stability}`);
+
+  // 個別音不穩只該扣掉自己那一份，不該把整首的安定性歸零。
+  // 逐音評分再平均才有這個性質。這裡讓四個音裡的最後一個明顯抖動，
+  // 其餘三個照譜唱，期望落在 60～90 分之間（沒有被判死，但確實扣分）。
+  {
+    const lastNote = chart.notes[chart.notes.length - 1];
+    const oneBad = sing(chart, (ref, t) => {
+      if (!ref) return 0;
+      if (t < lastNote.startMs) return ref;
+      return ref + 1.5 * Math.sin(2 * Math.PI * 1.0 * t / 1000);
+    });
+    check('單一個音不穩只扣自己那一份，不會把安定性歸零',
+          oneBad.breakdown.stability > 60 && oneBad.breakdown.stability < 90,
+          `${oneBad.breakdown.stability}（四個長音壞一個，完美為 ${perfect.breakdown.stability}）`);
+  }
+
+  const vibrato = sing(chart, (ref, t) => (ref ? ref + 0.35 * Math.sin(2 * Math.PI * 5.5 * t / 1000) : 0));
+  check('刻意顫音被算成技巧', vibrato.techniqueCounts.vibrato > 0,
+        `ビブラート×${vibrato.techniqueCounts.vibrato}`);
+
+  // 麥克風的取樣時點不會對齊譜面的 16ms 格點，這裡故意用 23ms 的間隔，
+  // 驗證不會有音框被誤判成「沒唱到」。
+  {
+    const scorer = new LiveScorer(chart, { keyShift: 0 });
+    for (let ms = 0; ms < chart.durationMs; ms += 23) {
+      const i = Math.round(ms / chart.hopMs);
+      const ref = chart.frames.midi[i] || 0;
+      scorer.addFrame({ t: ms / 1000, songMs: ms, midi: ref, conf: ref ? 0.95 : 0, rms: ref ? 0.2 : 0 });
+    }
+    const r = scorer.finish();
+    check('麥克風取樣間隔與譜面不同步時，完唱度仍為 100%',
+          r.breakdown.completion >= 99, `${r.breakdown.completion}%`);
+    check('麥克風取樣間隔不同步時，音程仍為滿分', r.breakdown.pitch >= 99, `${r.breakdown.pitch}`);
+  }
+
+  const silent = sing(chart, () => 0);
+  check('完全沒唱：總分 0', silent.total === 0, `${silent.total}`);
+}
+
+// ── 8. 播放 worklet（實際跑一次 AudioWorklet） ──────────────
+section('8. 升降調播放 worklet');
+{
+  const sr = 44100;
+  const seconds = 2;
+  const off = new OfflineAudioContext(1, sr * seconds, sr);
+  await off.audioWorklet.addModule('../js/pitchshift-worklet.js');
+  const node = new AudioWorkletNode(off, 'pitch-shift-processor', {
+    numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
+  });
+  node.connect(off.destination);
+
+  const src = sine(440, seconds + 0.5, sr, false);
+  const copy = src.slice();
+  // 離線渲染時每個 quantum 只會投遞一則訊息，因此初始狀態一次帶齊
+  node.port.postMessage(
+    { cmd: 'load', stems: [{ channels: [copy.buffer], gain: 1 }], semitones: 3, play: true },
+    [copy.buffer]);
+
+  const rendered = await off.startRendering();
+  const data = rendered.getChannelData(0);
+  let peak = 0;
+  for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i]));
+  check('worklet 有輸出聲音', peak > 0.05, `峰值 ${peak.toFixed(3)}`);
+
+  const got = measure(data.subarray(sr * 0.3, sr * 1.8), sr, 2048);
+  const expected = 440 * Math.pow(2, 3 / 12);
+  check('worklet +3 半音的音高正確（誤差 < 25 cents）',
+        got > 0 && cents(got, expected) < 25,
+        `期望 ${expected.toFixed(2)}Hz，測得 ${got.toFixed(2)}Hz`);
+}
+
+// ── 9. 即時音高平滑（麥克風路徑） ──────────────────────────
+section('9. 即時音高平滑');
+{
+  const hop = 11.6;   // 麥克風實際的偵測間隔
+
+  // 穩定唱 C4，中間穿插 YIN 常見的倍頻／半頻誤判與單框亂跳
+  {
+    const sm = new PitchSmoother();
+    const out = [];
+    for (let i = 0; i < 120; i++) {
+      let midi = 60 + (Math.random() - 0.5) * 0.2;
+      if (i % 17 === 0) midi += 12;            // 倍頻誤判
+      if (i % 23 === 0) midi -= 12;            // 半頻誤判
+      if (i === 40 || i === 77) midi = 40;     // 單框亂跳
+      const v = sm.push(midi, i * hop);
+      if (v) out.push(v);
+    }
+    const worst = Math.max(...out.map((v) => Math.abs(v - 60)));
+    check('八度誤判與單框亂跳被濾掉（全程維持在 C4 附近）', worst < 1,
+          `最大偏離 ${worst.toFixed(2)} 半音，輸出 ${out.length}/120 框`);
+  }
+
+  // 真正的換音要能通過，而且不能延遲太久
+  {
+    const sm = new PitchSmoother();
+    let firstAccepted = -1;
+    for (let i = 0; i < 60; i++) {
+      const midi = i < 30 ? 60 : 67;           // 第 30 框換到 G4
+      const v = sm.push(midi, i * hop);
+      if (i >= 30 && v > 65 && firstAccepted < 0) firstAccepted = i;
+    }
+    check('真正的換音仍能通過', firstAccepted >= 0, `第 ${firstAccepted} 框接受`);
+    check('換音延遲不超過 2 框（約 23ms）', firstAccepted >= 0 && firstAccepted - 30 <= 2,
+          `延遲 ${firstAccepted - 30} 框`);
+  }
+
+  // 不換氣直接飆上高八度：這正是「唱大高音卻顯示低八度」的情境
+  {
+    const sm = new PitchSmoother();
+    const out = [];
+    let firstAccepted = -1;
+    for (let i = 0; i < 90; i++) {
+      const midi = i < 30 ? 60 : 72;           // 第 30 框直接跳上 C5
+      const v = sm.push(midi, i * hop);
+      if (i >= 30) {
+        out.push(v);
+        if (v > 70 && firstAccepted < 0) firstAccepted = i;
+      }
+    }
+    check('不換氣飆高八度會被接受', firstAccepted >= 0, `第 ${firstAccepted} 框接受`);
+    check('高八度延遲不超過 6 框（約 70ms）',
+          firstAccepted >= 0 && firstAccepted - 30 <= 6, `延遲 ${firstAccepted - 30} 框`);
+    const tail = out.slice(20);
+    check('高八度之後全程維持在 C5，不會滑回低八度',
+          tail.length > 0 && tail.every((v) => Math.abs(v - 72) < 1),
+          `尾段 ${tail.length} 框，最大偏離 ${Math.max(...tail.map((v) => Math.abs(v - 72))).toFixed(2)} 半音`);
+  }
+
+  // 換氣停頓後從新音高重新開始，不該被舊音高擋住
+  {
+    const sm = new PitchSmoother();
+    for (let i = 0; i < 30; i++) sm.push(60, i * hop);
+    for (let i = 0; i < 30; i++) sm.push(0, (30 + i) * hop);   // 靜音 348ms
+    const v = sm.push(72, 60 * hop);
+    check('換氣後接高八度的新樂句不被擋掉', v === 72, `輸出 ${v}`);
+  }
+
+  // 唱得比確認所需時間還短的高音樂句：觀察期內只能回報「不確定」（0），
+  // 絕對不能主動顯示成拉回去的錯誤低八度——這正是使用者實際唱歌時反映的
+  // 「突然跳高音會少八度」。以前的寫法會在觀察期回傳 midi-oct（也就是拉回
+  // 舊八度），如果整句歌詞比確認時間還短，就永遠沒機會被更正。
+  {
+    const sm = new PitchSmoother();
+    for (let i = 0; i < 30; i++) sm.push(60, i * hop);
+    const out = [];
+    for (let i = 0; i < 3; i++) out.push(sm.push(72, (30 + i) * hop));   // 只唱 3 框就停了
+    check('觀察期內短促的高音不會被顯示成錯的低八度',
+          out.every((v) => v !== 60), `輸出 ${JSON.stringify(out)}`);
+  }
+
+  // 信心度愈高，確認換八度所需的框數愈少——唱得夠準時幾乎不該有延遲。
+  {
+    const sm = new PitchSmoother();
+    for (let i = 0; i < 30; i++) sm.push(60, i * hop);
+    let firstAccepted = -1;
+    for (let i = 0; i < 10; i++) {
+      const v = sm.push(72, (30 + i) * hop, 0.95);   // 高信心度
+      if (v > 70 && firstAccepted < 0) firstAccepted = i;
+    }
+    check('高信心度時換八度確認得更快', firstAccepted >= 0 && firstAccepted <= 1,
+          `第 ${firstAccepted} 框接受（0-indexed）`);
+  }
+
+  // 換完八度後要有一定的抵抗力：幾框雜訊不該立刻把它拉回去，
+  // 不然長音中途稍微雜訊一下就會來回震盪（低八度／高八度／正確音來回跳）。
+  {
+    const sm = new PitchSmoother();
+    for (let i = 0; i < 30; i++) sm.push(60, i * hop);
+    for (let i = 0; i < 10; i++) sm.push(72, (30 + i) * hop);   // 確認換到 72
+    const noisy = [];
+    for (let i = 0; i < 3; i++) noisy.push(sm.push(60, (40 + i) * hop));   // 3 框雜訊想拉回 60
+    check('換完八度後，短暫雜訊不會立刻翻回舊音',
+          noisy.every((v) => v !== 60), `輸出 ${JSON.stringify(noisy)}`);
+
+    // 但雜訊如果是真的（唱回原音持續夠久），最終還是要能換回去，
+    // 不能因為加了抵抗力就再也換不回來。
+    const persisted = [];
+    for (let i = 0; i < 8; i++) persisted.push(sm.push(60, (50 + i) * hop));
+    check('雜訊如果持續夠久，仍然能換回原本的音',
+          persisted.some((v) => v === 60), `輸出 ${JSON.stringify(persisted)}`);
+  }
+}
+
+// ── 10. 多軌播放（伴奏 + 原唱導唱） ────────────────────────
+section('10. 導唱軌');
+{
+  const sr = 44100, seconds = 1.5;
+
+  /** 以兩條 stem 渲染一次，回傳輸出。 */
+  async function renderStems(gain1) {
+    const off = new OfflineAudioContext(1, sr * seconds, sr);
+    await off.audioWorklet.addModule('../js/pitchshift-worklet.js');
+    const node = new AudioWorkletNode(off, 'pitch-shift-processor', {
+      numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
+    });
+    node.connect(off.destination);
+    const a = sine(440, seconds + 0.5, sr, false).slice();   // 伴奏
+    const b = sine(1200, seconds + 0.5, sr, false).slice();  // 導唱（刻意用高音好分辨）
+    node.port.postMessage({
+      cmd: 'load', semitones: 0, play: true,
+      stems: [
+        { channels: [a.buffer], gain: 1 },
+        { channels: [b.buffer], gain: gain1 },
+      ],
+    }, [a.buffer, b.buffer]);
+    const r = await off.startRendering();
+    return r.getChannelData(0);
+  }
+
+  const off0 = await renderStems(0);
+  const on1 = await renderStems(1);
+
+  const seg0 = off0.subarray(sr * 0.3, sr * 1.2);
+  const seg1 = on1.subarray(sr * 0.3, sr * 1.2);
+  const got0 = measure(seg0, sr, 2048);
+  check('導唱關閉時只聽得到伴奏（440Hz）', got0 > 0 && cents(got0, 440) < 20,
+        `測得 ${got0.toFixed(2)}Hz`);
+
+  let p0 = 0, p1 = 0;
+  for (let i = 0; i < seg0.length; i++) { p0 = Math.max(p0, Math.abs(seg0[i])); }
+  for (let i = 0; i < seg1.length; i++) { p1 = Math.max(p1, Math.abs(seg1[i])); }
+  check('導唱開啟後訊號變大（兩軌確實疊加）', p1 > p0 * 1.15,
+        `關 ${p0.toFixed(3)} → 開 ${p1.toFixed(3)}`);
+
+  // 兩軌共用同一個播放位置，因此開關導唱不會讓伴奏跑掉
+  let maxDiff = 0;
+  for (let i = 0; i < seg0.length; i++) maxDiff = Math.max(maxDiff, Math.abs(seg0[i]));
+  check('兩軌長度一致（共用播放位置）', off0.length === on1.length,
+        `${off0.length} vs ${on1.length}`);
+}
+
+const summary = document.getElementById('summary');
+summary.className = fail ? 'fail' : 'pass';
+summary.textContent = fail ? `FAIL — 通過 ${pass}，失敗 ${fail}` : `PASS — 全部 ${pass} 項通過`;
+</script>
+</body>
+</html>
