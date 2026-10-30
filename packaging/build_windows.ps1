@@ -173,8 +173,12 @@ sys.exit(subprocess.call([str(python), "-s", "-E", str(root / "app" / "launcher.
 Write-Host '==> 產生安裝檔'
 $Iscc = Get-Command 'ISCC.exe' -EA SilentlyContinue
 if (-not $Iscc) {
-  $guess = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
-  if (Test-Path $guess) { $Iscc = $guess } 
+  # winget 預設是裝在使用者目錄，不一定在 Program Files
+  foreach ($guess in 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+                     'C:\Program Files\Inno Setup 6\ISCC.exe',
+                     (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe')) {
+    if (Test-Path $guess) { $Iscc = $guess; break }
+  }
 } else { $Iscc = $Iscc.Source }
 
 if ($Iscc) {
