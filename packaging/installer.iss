@@ -32,6 +32,14 @@ Name: "chinesetraditional"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "建立桌面捷徑"; GroupDescription: "附加工作:"
 
+[InstallDelete]
+; 升級時先清掉舊版的程式檔。Inno Setup 預設只覆蓋、不刪除，舊版多出來的檔案
+; （例如 CUDA 版 torch 的 DLL、舊的 .dist-info、torch_directml）會跟新版混在一起，
+; 讓 torch 載入失敗。使用者的曲庫與設定在 %LOCALAPPDATA%\KaraokeScoring，不受影響。
+Type: filesandordirs; Name: "{app}\app"
+Type: filesandordirs; Name: "{app}\lib"
+Type: filesandordirs; Name: "{app}\python"
+
 [Files]
 Source: "{#MyStageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
