@@ -115,12 +115,25 @@ def local_ips() -> list[str]:
     return sorted(ip for ip in ips if not ip.startswith("127."))
 
 
-def ensure_cert(ips: list[str]) -> tuple[Path, Path] | None:
-    """產生涵蓋 localhost 與目前內網 IP 的自簽憑證。IP 換了就重簽。
+def cert_pair_ok(cert: Path, key: Path) -> bool:
+    """憑證與私鑰是不是同一對（讀得進 SSLContext 就是）。"""
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(certfile=str(cert), keyfile=str(key))
+        return True
+    except (ssl.SSLError, OSError, ValueError):
+        return False
+
+
+def ensure_cert(ips: list[str], force: bool = False) -> tuple[Path, Path] | None:
+    """產生涵蓋 localhost 與目前內網 IP 的自簽憑證。IP 換了、或檔案壞了就重簽。
 
     憑證是在 Python 裡直接簽的，不呼叫外部的 openssl 指令——Windows 上
     根本沒有那個指令，打包後的程式不能依賴它，否則內網就沒有 https，
     手機端也就不會有麥克風。
+
+    只比對 IP 不夠：兩份程式幾乎同時啟動（連點兩下圖示，第一份還在載入）時，
+    會各自重簽，一份寫的私鑰配上另一份寫的憑證，之後每次啟動都在
+    load_cert_chain 炸掉、整個程式開不起來。所以沿用前一定要確認是同一對。
     """
     CERT_DIR.mkdir(parents=True, exist_ok=True)
     cert, key, stamp = CERT_DIR / "cert.pem", CERT_DIR / "key.pem", CERT_DIR / "san.txt"
@@ -128,7 +141,8 @@ def ensure_cert(ips: list[str]) -> tuple[Path, Path] | None:
     hostname = socket.gethostname()
     fingerprint = ",".join(["localhost", hostname, "127.0.0.1", *ips])
 
-    if cert.exists() and key.exists() and stamp.exists() and stamp.read_text() == fingerprint:
+    if (not force and cert.exists() and key.exists() and stamp.exists()
+            and stamp.read_text() == fingerprint and cert_pair_ok(cert, key)):
         return cert, key
 
     try:
@@ -174,12 +188,16 @@ def ensure_cert(ips: list[str]) -> tuple[Path, Path] | None:
         .sign(key_obj, hashes.SHA256())
     )
 
-    key.write_bytes(key_obj.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=serialization.NoEncryption(),
-    ))
-    cert.write_bytes(cert_obj.public_bytes(serialization.Encoding.PEM))
+    # 先寫到暫存檔再換上去，寫到一半被中斷也不會留下半個檔案
+    tag = f".{os.getpid()}.tmp"
+    for path, data in ((key, key_obj.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption())),
+            (cert, cert_obj.public_bytes(serialization.Encoding.PEM))):
+        tmp = path.with_name(path.name + tag)
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
     stamp.write_text(fingerprint)
     return cert, key
 
@@ -874,9 +892,13 @@ def find_free_port(preferred: int) -> int:
 def serve(port: int, tls: tuple[Path, Path] | None) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((HOST, port), Handler)
     if tls:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(certfile=str(tls[0]), keyfile=str(tls[1]))
-        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(certfile=str(tls[0]), keyfile=str(tls[1]))
+            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        except Exception:
+            server.server_close()   # 放掉連接埠，呼叫端才能用新憑證重試
+            raise
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -896,7 +918,21 @@ def start() -> dict:
     https_port = None
     if tls:
         https_port = find_free_port(HTTPS_PORT)
-        serve(https_port, tls)
+        try:
+            serve(https_port, tls)
+        except (ssl.SSLError, OSError) as exc:
+            # 憑證剛好被另一份同時啟動的程式換掉之類的情況：重簽一次再試，
+            # 還是不行就只開 HTTP——這台電腦照樣能用，不該整個程式開不起來
+            print(f"！HTTPS 啟動失敗（{exc}），重新產生憑證再試一次")
+            tls = ensure_cert(ips, force=True)
+            try:
+                if tls:
+                    serve(https_port, tls)
+                else:
+                    https_port = None
+            except (ssl.SSLError, OSError) as exc2:
+                print(f"！HTTPS 仍無法啟動（{exc2}），這次只開 HTTP（其他裝置不會有麥克風）")
+                https_port = None
 
     INFO.update({
         "httpPort": http_port,
