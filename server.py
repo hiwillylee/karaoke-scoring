@@ -22,6 +22,9 @@
   POST /api/lyrics/url      {id, url}             LRCLIB 查詢網址或 .lrc 網址
   POST /api/lyrics/offset   {id, offsetMs}        整首歌詞的時間微調
   POST /api/lyrics/delete   {id}
+  GET  /api/song?id=&kind=cover                 封面圖片
+  POST /api/song/cover?id=  body 為圖片位元組   使用者上傳封面（jpg/png/webp）
+  POST /api/song/cover/refetch  {id}            重新自動找封面
 """
 
 from __future__ import annotations
@@ -201,6 +204,7 @@ def run_job(job: dict) -> None:
     src = job.get("src")
     name = job.get("name") or "未命名"
     extra_meta = {}
+    thumbnail = None
 
     try:
         # 1) 網址來源：先下載
@@ -217,6 +221,7 @@ def run_job(job: dict) -> None:
                 "sourceUrl": got["webpageUrl"],
                 "uploader": got["uploader"],
             }
+            thumbnail = got.get("thumbnail")
             set_progress(job_id, "下載完成，開始分析…", 0.26, name=name)
 
         # 2) 分離 + 抽音高 + 標技巧
@@ -234,8 +239,16 @@ def run_job(job: dict) -> None:
                            instrumental=result["instrumental"],
                            vocals=result.get("vocals"),
                            **extra_meta)
-        # 歌詞在背景抓，不佔分析佇列（抓不到也不影響唱歌）
+        # 本機音檔的內嵌封面要趁原始檔還在時抽出來（finally 會清掉工作目錄）
+        if not job.get("url"):
+            import covers
+            data = covers.embedded_cover(Path(src), work_dir)
+            if data:
+                LIBRARY.save_cover(song_id, data, covers.image_kind(data), "音檔內嵌")
+        # 歌詞與網路封面在背景抓，不佔分析佇列（抓不到也不影響唱歌）
         threading.Thread(target=auto_lyrics, args=(song_id,), daemon=True).start()
+        if job.get("url"):
+            threading.Thread(target=auto_cover, args=(song_id, thumbnail), daemon=True).start()
         set_progress(job_id, "完成", 1.0, state="done",
                      songId=song_id, name=name,
                      notes=meta["notes"], techniques=meta["techniques"])
@@ -248,6 +261,32 @@ def run_job(job: dict) -> None:
 
 
 LYRICS_LOCK = threading.Lock()
+
+
+def auto_cover(song_id: str, thumbnail: str | None = None) -> dict | None:
+    """自動找封面並存檔；找不到就記下來，下次啟動不再重找。"""
+    import covers
+    meta = LIBRARY.meta(song_id)
+    if meta is None:
+        return None
+    try:
+        data = covers.fetch_for(meta, thumbnail)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        data = None
+    if not data:
+        LIBRARY.mark_cover_tried(song_id)
+        return None
+    return LIBRARY.save_cover(song_id, data, covers.image_kind(data), "自動")
+
+
+def backfill_covers() -> None:
+    """舊版曲庫的歌沒有封面：啟動後在背景補，一首一首慢慢來。"""
+    for meta in LIBRARY.list():
+        if LIBRARY.cover_path(meta["id"]) or meta.get("coverTried") or not meta.get("sourceId"):
+            continue
+        got = auto_cover(meta["id"])
+        print(f"[cover] {meta.get('name')}：{'已補上' if got else '找不到'}", flush=True)
 
 
 def auto_lyrics(song_id: str, title: str | None = None, artist: str | None = None) -> dict | None:
@@ -428,6 +467,17 @@ class Handler(SimpleHTTPRequestHandler):
         if path.startswith("/api/lyrics/"):
             self.handle_lyrics(path)
             return
+        if path == "/api/song/cover":
+            self.handle_cover_upload()
+            return
+        if path == "/api/song/cover/refetch":
+            song_id = str(self._read_json_body().get("id", ""))
+            if LIBRARY.meta(song_id) is None:
+                self._json({"error": "找不到歌曲"}, 404)
+                return
+            meta = auto_cover(song_id)
+            self._json(meta or {"error": "找不到這首歌的封面"}, 200 if meta else 404)
+            return
         if path == "/api/song/delete":
             body = self._read_json_body()
             ok = LIBRARY.delete(str(body.get("id", "")))
@@ -471,6 +521,25 @@ class Handler(SimpleHTTPRequestHandler):
             }
         JOB_QUEUE.put({"jobId": job_id, "src": src, "name": name})
         self._json({"jobId": job_id, "name": name, "queued": ahead})
+
+    def handle_cover_upload(self):
+        """使用者上傳封面。只收 jpg/png/webp（看檔頭），8MB 以內。"""
+        import covers
+        _, query = self._query()
+        song_id = (query.get("id") or [""])[0]
+        if LIBRARY.meta(song_id) is None:
+            self._json({"error": "找不到歌曲"}, 404)
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > covers.MAX_BYTES:
+            self._json({"error": "圖片要在 8MB 以內"}, 413 if length else 400)
+            return
+        data = self.rfile.read(length)
+        kind = covers.image_kind(data)
+        if kind is None:
+            self._json({"error": "只支援 JPG、PNG、WebP 圖片"}, 400)
+            return
+        self._json(LIBRARY.save_cover(song_id, data, kind, "使用者上傳"))
 
     def handle_lyrics(self, path: str):
         import lyrics as lyrics_mod
@@ -600,7 +669,8 @@ class Handler(SimpleHTTPRequestHandler):
             # 曲庫清單。只回中繼資料，音檔要另外抓——手機開曲庫時
             # 不該把幾百 MB 的音軌一起拉下來。
             q = (query.get("q") or [""])[0]
-            self._json({"songs": LIBRARY.search(q) if q else LIBRARY.list()})
+            self._json({"songs": LIBRARY.search(q) if q else LIBRARY.list(),
+                        "artists": LIBRARY.artists()})
             return
 
         if path == "/api/song":
@@ -610,6 +680,15 @@ class Handler(SimpleHTTPRequestHandler):
             if kind == "meta":
                 meta = LIBRARY.meta(song_id)
                 self._json(meta or {"error": "找不到歌曲"}, 200 if meta else 404)
+                return
+
+            if kind == "cover":
+                import library as library_mod
+                cover = LIBRARY.cover_path(song_id)
+                if cover is None:
+                    self._json({"error": "沒有封面"}, 404)
+                    return
+                self._send_file(cover, library_mod.COVER_TYPES[cover.suffix[1:]])
                 return
 
             if kind == "lyrics":
@@ -804,6 +883,8 @@ def start() -> dict:
     """啟動服務並回傳連線資訊。給 launcher 與命令列共用。"""
     WORK.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=worker_loop, daemon=True).start()
+    threading.Thread(target=backfill_covers, daemon=True).start()
+    LIBRARY.backfill_artists()
 
     ips = local_ips()
     tls = ensure_cert(ips)

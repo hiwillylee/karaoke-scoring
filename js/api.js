@@ -17,12 +17,37 @@ async function json(url, options) {
 export async function listSongs(query = '') {
   const url = query ? `api/songs?q=${encodeURIComponent(query)}` : 'api/songs';
   const data = await json(url);
+  lastArtists = data.artists || [];
   return data.songs || [];
 }
+
+let lastArtists = [];
+/** 上一次 listSongs 一起帶回來的歌手清單（{name, count}，依歌數排序）。 */
+export const artists = () => lastArtists;
 
 export const getSong = (id) => json(`api/song?id=${encodeURIComponent(id)}&kind=meta`);
 
 export const getChart = (id) => json(`api/song?id=${encodeURIComponent(id)}&kind=chart`);
+
+// ---- 封面 -----------------------------------------------------------------
+
+/** 封面網址；沒有封面回傳 null。meta.cover 是封面的版本（換了封面網址才會變，快取才會更新）。 */
+export const coverUrl = (song) =>
+  (song?.cover ? `api/song?id=${encodeURIComponent(song.id)}&kind=cover&v=${song.cover}` : null);
+
+/** 上傳封面圖片（jpg/png/webp），回傳更新後的 meta。 */
+export const uploadCover = (id, file) => json(`api/song/cover?id=${encodeURIComponent(id)}`, {
+  method: 'POST',
+  headers: { 'Content-Type': file.type || 'application/octet-stream' },
+  body: file,
+});
+
+/** 重新自動找封面（YT Music 專輯封面 → 影片縮圖）。 */
+export const refetchCover = (id) => json('api/song/cover/refetch', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ id }),
+});
 
 // ---- 歌詞 -----------------------------------------------------------------
 

@@ -32,7 +32,7 @@
     <div class="search-field">
       <span class="search-icon">⌕</span>
       <input type="search" id="search-input" autocomplete="off" spellcheck="false"
-             placeholder="搜尋曲庫，或貼上 YouTube／YouTube Music／Bilibili 網址">
+             placeholder="搜尋歌名或歌手，或貼上 YouTube／YouTube Music／Bilibili 網址">
       <button class="search-clear hidden" id="search-clear" title="清除">✕</button>
     </div>
     <button class="upload-btn" id="upload-btn" title="上傳本機音檔">＋</button>
@@ -40,6 +40,8 @@
   </div>
   <div id="search-status" class="search-status hidden"></div>
   <div id="backend-warning" class="banner warn hidden"></div>
+  <div class="library-head"><h2>曲庫</h2><span class="muted small" id="library-count"></span></div>
+  <div class="artist-bar" id="artist-bar"></div>
   <div id="song-list" class="song-grid"></div>
 </section>
 
@@ -58,7 +60,19 @@
 
 <!-- ── 譜面確認 ───────────────────────────────────────────── -->
 <section id="screen-chart" class="screen">
-  <h2>譜面確認 <span class="muted small" id="chart-song-name"></span></h2>
+  <div class="chart-head">
+    <button class="cover-thumb" id="chart-cover" title="更換封面（JPG／PNG／WebP）"></button>
+    <input type="file" id="cover-file" accept="image/jpeg,image/png,image/webp" hidden>
+    <div class="grow">
+      <h2>譜面確認</h2>
+      <div class="muted" id="chart-song-name"></div>
+      <div class="cover-actions">
+        <button class="ghost tiny" id="cover-upload">更換封面</button>
+        <button class="ghost tiny" id="cover-refetch">重新抓封面</button>
+        <span class="muted small" id="cover-status"></span>
+      </div>
+    </div>
+  </div>
   <p class="muted">播放並拖曳時間軸，確認音程條的走勢跟旋律對得上。對不上時到「進階」調整。</p>
   <canvas id="chart-preview" class="preview"></canvas>
   <canvas id="chart-overview" class="overview" title="全曲總覽：點一下或拖曳可跳到該處"></canvas>
@@ -185,10 +199,14 @@
 </section>
 
 <!-- ── 演唱 ───────────────────────────────────────────────── -->
-<section id="screen-sing" class="screen sing">
+<section id="screen-sing" class="screen sing monitor">
+  <div class="backdrop" id="sing-backdrop"></div>
   <div class="sing-head">
     <div class="sing-row title-row">
-      <div class="sing-title" id="sing-song-name"></div>
+      <div class="sing-meta">
+        <div class="sing-cover" id="sing-cover"></div>
+        <div class="sing-title" id="sing-song-name"></div>
+      </div>
       <div class="live-score"><span id="live-score">0</span><small>分</small></div>
     </div>
     <div class="sing-row controls-row">
@@ -207,7 +225,7 @@
     <div id="countdown" class="countdown hidden"></div>
     <div id="tech-popup" class="tech-popup"><canvas width="132" height="66"></canvas></div>
   </div>
-  <div id="sing-lyrics" class="lyrics-panel"></div>
+  <div id="sing-lyrics" class="lyrics-panel dam"></div>
   <div class="sing-foot">
     <div id="pitch-hint" class="pitch-hint">—</div>
     <div class="row">
@@ -219,9 +237,11 @@
 </section>
 
 <!-- ── 結算 ───────────────────────────────────────────────── -->
-<section id="screen-result" class="screen">
+<section id="screen-result" class="screen monitor">
+  <div class="backdrop" id="result-backdrop"></div>
   <div class="result-head">
     <canvas id="particles" class="particles"></canvas>
+    <div class="result-song"><div class="sing-cover" id="result-cover"></div><div class="t" id="result-song-name"></div></div><br>
     <div class="grade" id="result-grade">—</div>
     <div class="big-score"><span id="result-score">0.0</span><small>分</small></div>
     <div class="comment" id="result-comment"></div>

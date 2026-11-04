@@ -138,7 +138,8 @@ export class LyricsView {
    */
   constructor(root, opts = {}) {
     this.root = root;
-    this.opts = { ruby: true, romaji: true, karaoke: true, ...opts };
+    // layout：'dam' 演唱畫面的兩行交錯；'compact' 目前這句大字＋下一句小字（譜面頁試聽用）
+    this.opts = { ruby: true, romaji: true, karaoke: true, layout: 'compact', ...opts };
     this.lines = [];
     this.synced = true;
     this.bigIdx = -2;
@@ -243,12 +244,24 @@ export class LyricsView {
     const next = this.lines[idx + 1];
     const romaji = (l) => (this.opts.romaji && l?.romaji ? `<div class="lyr-romaji">${escapeHtml(l.romaji)}</div>` : '');
     const interlude = (l) => isInterlude(l.text);
-    this.root.innerHTML = `
-      <div class="lyr-line big${this.opts.karaoke && line.ct ? ' wipe' : ''}${interlude(line) ? ' interlude' : ''}">
-        <div class="lyr-text">${interlude(line) ? '♪' : this.lineHtml(line, true)}</div>${romaji(line)}
-      </div>
-      <div class="lyr-line next">${next ? `<div class="lyr-text">${interlude(next) ? '♪' : this.lineHtml(next, false)}</div>${romaji(next)}` : ''}</div>`;
-    this.bigEl = this.root.querySelector('.lyr-line.big');
+    const wipe = this.opts.karaoke && line.ct ? ' wipe' : '';
+    const body = (l, withChars) => (l
+      ? `<div class="lyr-text">${interlude(l) ? '♪' : this.lineHtml(l, withChars)}</div>${romaji(l)}`
+      : '');
+    if (this.opts.layout === 'dam') {
+      // 卡拉OK的兩行交錯：第偶數句固定在上行（靠左）、奇數句在下行（靠右）。
+      // 唱到下一句時只換掉唱完的那一行，另一行原地不動，眼睛不必跟著跳。
+      const cur = `<div class="lyr-slot big${wipe}${interlude(line) ? ' interlude' : ''}" data-cur>${body(line, true)}</div>`;
+      const other = `<div class="lyr-slot${next ? '' : ' empty-slot'}${next && interlude(next) ? ' interlude' : ''}">${body(next, false) || '&nbsp;'}</div>`;
+      const [top, bottom] = idx % 2 === 0 ? [cur, other] : [other, cur];
+      this.root.innerHTML = top + bottom.replace('class="lyr-slot', 'class="lyr-slot second');
+      this.bigEl = this.root.querySelector('[data-cur]');
+    } else {
+      this.root.innerHTML = `
+        <div class="lyr-line big${wipe}${interlude(line) ? ' interlude' : ''}">${body(line, true)}</div>
+        <div class="lyr-line next">${body(next, false)}</div>`;
+      this.bigEl = this.root.querySelector('.lyr-line.big');
+    }
     this.chars = [];
     this.rubies = [];
     if (line.ct) {

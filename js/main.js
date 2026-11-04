@@ -76,6 +76,8 @@ const NAV_GROUP = {
 
 function show(name) {
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === `screen-${name}`));
+  // 演唱／結算畫面整頁換成螢幕的深藍（見 css 的 body[data-screen]）
+  document.body.dataset.screen = name;
   const group = NAV_GROUP[name];
   $$('button[data-goto]').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.goto === group);
@@ -109,18 +111,68 @@ function escapeHtml(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ── 封面 ────────────────────────────────────────────────────
+
+/** 沒有封面時的預設封面：依歌名決定色相，同一首歌每次都同一個顏色。 */
+function coverPlaceholder(song) {
+  const name = song?.name || '';
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.codePointAt(0)) % 360;
+  const first = [...name.replace(/^[\s【「『（(\[]+/, '')][0] || '♪';
+  return `<div class="cover-ph" style="--h:${h}"><b>${escapeHtml(first)}</b><i>♪</i></div>`;
+}
+
+function coverHtml(song) {
+  const url = api.coverUrl(song);
+  return url
+    ? `<img class="cover-img" src="${url}" alt="" loading="lazy" decoding="async">`
+    : coverPlaceholder(song);
+}
+
+// 封面圖讀不到（檔案被刪、網路斷）時換回預設封面，不要留一個破圖示
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('cover-img')) return;
+  const holder = img.closest('[data-cover-name]');
+  img.outerHTML = coverPlaceholder({ name: holder?.dataset.coverName || '' });
+}, true);
+
+function setCover(el, song) {
+  el.dataset.coverName = song?.name || '';
+  el.innerHTML = coverHtml(song);
+}
+
+/** 演唱／結算畫面的背景：封面放大模糊。沒有封面就只留深藍底。 */
+function setBackdrop(el, song) {
+  const url = api.coverUrl(song);
+  el.classList.toggle('show', !!url);
+  el.innerHTML = url ? `<img src="${url}" alt="">` : '';
+}
+
 function songCard(song, best, matched = false) {
-  const source = song.source
-    ? `<span class="source">${escapeHtml(song.source)}</span>` : '';
+  const tags = [
+    song.source ? `<span class="source">${escapeHtml(song.source)}</span>` : '',
+    song.lyrics ? '<span class="lyr-tag" title="有歌詞">♪ 歌詞</span>' : '',
+  ].join('');
   return `
     <div class="song-card${matched ? ' matched' : ''}" data-id="${escapeHtml(song.id)}">
-      <div class="name">${escapeHtml(song.name)}${source}${song.lyrics ? '<span class="lyr-tag" title="有歌詞">♪歌詞</span>' : ''}</div>
-      <div class="meta">${fmtDuration(song.durationMs)}・${song.notes} 音</div>
-      ${best ? `<div class="best">最佳 ${best.total.toFixed(1)} 分</div>` : ''}
+      <button class="cover" data-act="sing" title="演唱" data-cover-name="${escapeHtml(song.name)}">
+        ${coverHtml(song)}
+        <span class="play">演唱</span>
+        ${best ? `<span class="best-badge">${best.total.toFixed(1)}</span>` : ''}
+      </button>
+      <div class="info">
+        <div class="name" title="${escapeHtml(song.name)}">${escapeHtml(song.name)}</div>
+        ${song.artist || song.uploader
+    ? `<button class="artist" data-artist="${escapeHtml(song.artist || song.uploader)}" title="列出這位歌手的歌">${escapeHtml(song.artist || song.uploader)}</button>`
+    : ''}
+        ${tags ? `<div class="tags">${tags}</div>` : ''}
+        <div class="meta">${fmtDuration(song.durationMs)}・${song.notes} 音</div>
+      </div>
       <div class="row">
         <button class="primary tiny" data-act="sing">演唱</button>
         <button class="ghost tiny" data-act="chart">譜面</button>
-        <button class="ghost tiny danger" data-act="del">刪除</button>
+        <button class="ghost tiny danger icon" data-act="del" title="刪除">✕</button>
       </div>
     </div>`;
 }
@@ -135,6 +187,8 @@ async function renderLibrary(query = '', matchedId = null) {
     return;
   }
   state.songs = songs;
+  $('#library-count').textContent = songs.length ? `${songs.length} 首` : '';
+  renderArtistBar(query);
 
   if (!songs.length) {
     list.innerHTML = query
@@ -153,7 +207,37 @@ async function renderLibrary(query = '', matchedId = null) {
   }
 }
 
+// ── 用歌手找歌 ──────────────────────────────────────────────
+//
+// 曲庫上方一排歌手按鈕（兩首以上才列，避免一長串只有一首的頻道名），
+// 按下去等於在搜尋列輸入歌手名；卡片上的歌手名也可以點。
+
+function searchArtist(name) {
+  const input = $('#search-input');
+  const same = input.value.trim() === name;
+  input.value = same ? '' : name;   // 再按一次同一位就取消篩選
+  input.dispatchEvent(new Event('input'));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function renderArtistBar(query) {
+  const bar = $('#artist-bar');
+  const list = api.artists().filter((a) => a.count >= 2);
+  bar.classList.toggle('hidden', !list.length);
+  const q = (query || '').trim();
+  bar.innerHTML = list.map((a) =>
+    `<button class="chip${a.name === q ? ' on' : ''}" data-artist="${escapeHtml(a.name)}">`
+    + `${escapeHtml(a.name)}<small>${a.count}</small></button>`).join('');
+}
+
+$('#artist-bar').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-artist]');
+  if (btn) searchArtist(btn.dataset.artist);
+});
+
 $('#song-list').addEventListener('click', async (e) => {
+  const artistBtn = e.target.closest('button[data-artist]');
+  if (artistBtn) { searchArtist(artistBtn.dataset.artist); return; }
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const id = btn.closest('.song-card').dataset.id;
@@ -338,6 +422,8 @@ async function openChartScreen(idOrSong) {
   const song = typeof idOrSong === 'string' ? await loadSong(idOrSong) : idOrSong;
   state.pendingSong = song;
   $('#chart-song-name').textContent = song.name;
+  setCover($('#chart-cover'), song);
+  $('#cover-status').textContent = song.cover ? '' : '還沒有封面';
   $('#octave-slider').value = song.octaveOffset || 0;
   $('#sens-slider').value = song.minConfidence ?? PARAMS.pitch.minConfidence;
   $('#level-slider').value = song.minLevelDb ?? PARAMS.pitch.minLevelDb;
@@ -1079,6 +1165,8 @@ async function startSinging(idOrSong) {
   const song = typeof idOrSong === 'string' ? await loadSong(idOrSong) : idOrSong;
   show('sing');
   $('#sing-song-name').textContent = song.name;
+  setCover($('#sing-cover'), song);
+  setBackdrop($('#sing-backdrop'), song);
   $('#live-score').textContent = '0';
   $('#pitch-hint').textContent = '—';
   $('#countdown').classList.remove('hidden');
@@ -1360,6 +1448,9 @@ async function finishSinging() {
 
 async function showResult(res) {
   show('result');
+  setCover($('#result-cover'), state.song);
+  setBackdrop($('#result-backdrop'), state.song);
+  $('#result-song-name').textContent = state.song?.name || '';
   $('#result-grade').textContent = res.grade;
   $('#result-comment').textContent = res.comment;
   result.animateScore($('#result-score'), res.total);
@@ -1621,6 +1712,50 @@ $('#silence-slider').addEventListener('input', async (e) => {
 
 $('#settings-back').addEventListener('click', () => show('library'));
 
+// ── 封面（譜面頁的更換／重抓） ─────────────────────────────────
+
+function applyCoverMeta(meta) {
+  const song = state.pendingSong;
+  if (!song || meta?.id !== song.id) return;
+  song.cover = meta.cover;
+  song.coverSource = meta.coverSource;
+  setCover($('#chart-cover'), song);
+  const listed = state.songs?.find((s) => s.id === song.id);
+  if (listed) { listed.cover = meta.cover; listed.coverSource = meta.coverSource; }
+}
+
+const pickCover = () => $('#cover-file').click();
+$('#chart-cover').addEventListener('click', pickCover);
+$('#cover-upload').addEventListener('click', pickCover);
+$('#cover-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  const song = state.pendingSong;
+  if (!file || !song) return;
+  if (file.size > 8 * 1024 * 1024) { $('#cover-status').textContent = '圖片要在 8MB 以內'; return; }
+  $('#cover-status').textContent = '上傳中…';
+  try {
+    applyCoverMeta(await api.uploadCover(song.id, file));
+    $('#cover-status').textContent = '已更換';
+  } catch (err) {
+    $('#cover-status').textContent = `失敗：${err.message}`;
+  }
+});
+$('#cover-refetch').addEventListener('click', async () => {
+  const song = state.pendingSong;
+  if (!song) return;
+  $('#cover-refetch').disabled = true;
+  $('#cover-status').textContent = '尋找中…';
+  try {
+    applyCoverMeta(await api.refetchCover(song.id));
+    $('#cover-status').textContent = '已更新';
+  } catch (err) {
+    $('#cover-status').textContent = err.message;
+  } finally {
+    $('#cover-refetch').disabled = false;
+  }
+});
+
 // ── 歌詞 ────────────────────────────────────────────────────
 //
 // 歌詞存在伺服器上（library/<id>/lyrics.json），加歌時就在背景自動抓。
@@ -1657,7 +1792,9 @@ function lyricsViewOpts() {
 
 /** 演唱畫面：先顯示已有的歌詞；從來沒抓過就在背景抓一次，抓到了再補上。 */
 async function setupSingLyrics(song) {
-  if (!state.lyricsView) state.lyricsView = new LyricsView($('#sing-lyrics'), lyricsViewOpts());
+  if (!state.lyricsView) {
+    state.lyricsView = new LyricsView($('#sing-lyrics'), { ...lyricsViewOpts(), layout: 'dam' });
+  }
   state.lyrics = null;
   state.lyricsView.setLyrics(null, [], '');
   let data = null;

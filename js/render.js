@@ -1,7 +1,8 @@
 // render.js — 演唱畫面的音程條（横向捲動的 Canvas）。
 //
-// 參考音是半透明青色長條，實際唱的音以發光線條疊在上面；
-// 落在 ±50 cents 內的區段轉成金色，一眼就看得出哪裡唱準了。
+// 參考音是白色半透明的長條（點歌機的音程條），實際唱的音以發光線條疊在上面；
+// 落在 ±50 cents 內的區段轉成黃色，一眼就看得出哪裡唱準了。
+// 目前音高用一個 ▶ 指標標在判定線左側。
 //
 // 標了技巧的音，長條本身就換成該技巧的顏色，並在上方畫一個小符號
 // （しゃくり＝往上的曲線、フォール＝往下的曲線、ビブラート＝波浪），
@@ -177,16 +178,16 @@ export class StageRenderer {
     for (let m = Math.ceil(min); m <= Math.floor(max); m++) {
       const y = this.yOf(m + 0.5);
       const pc = ((m % 12) + 12) % 12;
-      ctx.fillStyle = BLACK_KEYS.has(pc) ? 'rgba(255,255,255,0.028)' : 'rgba(255,255,255,0.008)';
+      ctx.fillStyle = BLACK_KEYS.has(pc) ? 'rgba(160,190,255,0.045)' : 'rgba(255,255,255,0.0)';
       ctx.fillRect(0, y, this.w, semiH);
       if (pc === 0) {
-        ctx.strokeStyle = 'rgba(0,229,255,0.16)';
+        ctx.strokeStyle = 'rgba(160,190,255,0.22)';
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(0, y + semiH);
         ctx.lineTo(this.w, y + semiH);
         ctx.stroke();
-        ctx.fillStyle = 'rgba(0,229,255,0.45)';
+        ctx.fillStyle = 'rgba(190,210,255,0.6)';
         ctx.font = '11px ui-monospace, monospace';
         ctx.textAlign = 'right';
         ctx.fillText(midiToName(m), this.w - 6, y + semiH - 4);
@@ -214,11 +215,11 @@ export class StageRenderer {
       // 有標技巧的音，長條直接換成該技巧的顏色；其餘維持青色
       const techs = this.techByNote.get(i);
       const fill = techs
-        ? techniqueColor(techs[0], passed ? 0.20 : 0.42)
-        : (passed ? 'rgba(0,229,255,0.14)' : 'rgba(0,229,255,0.30)');
+        ? techniqueColor(techs[0], passed ? 0.22 : 0.45)
+        : (passed ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.26)');
       const stroke = techs
-        ? techniqueColor(techs[0], passed ? 0.35 : 0.9)
-        : (passed ? 'rgba(0,229,255,0.25)' : 'rgba(0,229,255,0.75)');
+        ? techniqueColor(techs[0], passed ? 0.35 : 0.95)
+        : (passed ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.9)');
 
       ctx.fillStyle = fill;
       roundRect(ctx, x0, y, width, barH, barH / 2);
@@ -249,7 +250,7 @@ export class StageRenderer {
     const x = this.w * JUDGE_RATIO;
     const grad = ctx.createLinearGradient(x - 2, 0, x + 2, 0);
     grad.addColorStop(0, 'rgba(255,255,255,0)');
-    grad.addColorStop(0.5, 'rgba(255,255,255,0.55)');
+    grad.addColorStop(0.5, 'rgba(255,255,255,0.75)');
     grad.addColorStop(1, 'rgba(255,255,255,0)');
     ctx.fillStyle = grad;
     ctx.fillRect(x - 2, 0, 4, this.h);
@@ -275,8 +276,8 @@ export class StageRenderer {
         ctx.lineTo(this.xOf(this.trail[j].t, nowMs), this.yOf(this.trail[j].midi));
         j++;
       }
-      ctx.strokeStyle = hit ? '#ffd54a' : '#ff2bd6';
-      ctx.shadowColor = hit ? 'rgba(255,213,74,0.9)' : 'rgba(255,43,214,0.8)';
+      ctx.strokeStyle = hit ? '#ffd23f' : '#ff4f8b';
+      ctx.shadowColor = hit ? 'rgba(255,210,63,0.95)' : 'rgba(255,79,139,0.8)';
       ctx.shadowBlur = 10;
       ctx.stroke();
       ctx.shadowBlur = 0;
@@ -290,13 +291,20 @@ export class StageRenderer {
     if (!last || nowMs - last.t > 200) return;
     const x = this.w * JUDGE_RATIO;
     const y = this.yOf(last.midi);
+    // ▶ 指標：尖端貼在判定線上
     ctx.beginPath();
-    ctx.arc(x, y, 7, 0, Math.PI * 2);
-    ctx.fillStyle = last.hit ? '#ffd54a' : '#ff2bd6';
+    ctx.moveTo(x - 2, y);
+    ctx.lineTo(x - 17, y - 9);
+    ctx.lineTo(x - 17, y + 9);
+    ctx.closePath();
+    ctx.fillStyle = last.hit ? '#ffd23f' : '#ff4f8b';
     ctx.shadowColor = ctx.fillStyle;
-    ctx.shadowBlur = 18;
+    ctx.shadowBlur = 16;
     ctx.fill();
     ctx.shadowBlur = 0;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.stroke();
 
     if (opts.showNoteName !== false) {
       ctx.fillStyle = 'rgba(255,255,255,0.85)';

@@ -163,6 +163,7 @@ def download(url: str, dest_dir: Path, progress=None) -> dict:
         "uploader": info.get("uploader") or info.get("channel") or "",
         "durationMs": int((info.get("duration") or 0) * 1000),
         "webpageUrl": info.get("webpage_url") or url,
+        "thumbnail": info.get("thumbnail") or "",
     }
 
 
