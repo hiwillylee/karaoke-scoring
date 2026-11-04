@@ -53,7 +53,7 @@ find "$RES/lib" -path "*/tests/*" -name "*.py" -delete 2>/dev/null || true
 
 echo "==> 複製程式與網頁資源"
 mkdir -p "$RES/app"
-for item in server.py analyze.py launcher.py library.py fetcher.py tunnel.py index.html js css config assets; do
+for item in server.py analyze.py launcher.py library.py fetcher.py tunnel.py lyrics.py index.html js css config assets; do
   ditto "$item" "$RES/app/$item"
 done
 

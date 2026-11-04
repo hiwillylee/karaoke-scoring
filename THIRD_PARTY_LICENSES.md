@@ -22,6 +22,10 @@ copyleft 套件的完整授權全文；其餘寬鬆授權的套件則各自把�
 | **mutagen** | GPL-2.0-or-later | yt-dlp 用來在 `--embed-thumbnail` 時寫入音檔縮圖標籤 | 不會 — 本專案沒有使用 `--embed-thumbnail`，這個套件只是隨 `yt-dlp[default]` 一起被安裝、打包，實際執行路徑不會匯入它 | <https://github.com/quodlibet/mutagen> |
 | **lameenc** | LGPL-3.0-or-later | Demucs 的相依套件，供輸出 MP3 用 | 不會 — 本專案沒有要求 Demucs 輸出 MP3（輸出的是 wav），程式碼不會呼叫到 | <https://github.com/chrisstaite/lameenc> |
 | **python-soxr** | LGPL-2.1-or-later | librosa 內部做音訊重取樣 | **會**，`librosa.load`／`resample` 實際路徑可能用到 | <https://github.com/dofuuz/python-soxr>（底層 `libsoxr`：<https://sourceforge.net/p/soxr/>） |
+| **pykakasi** | GPL-3.0-or-later | 日文歌詞的振假名與羅馬拼音（`lyrics.py`） | **會**，每次處理日文歌詞都用到 | <https://codeberg.org/miurahr/pykakasi> |
+
+> pykakasi 與上面四項不同：它是被 `lyrics.py` **直接 import 進同一個 Python 行程**，
+> 不是子行程。本專案本身以 GPL-3.0 釋出（見 `LICENSE`），與它的授權相容。
 
 **若只是自己使用或私下分享給少數朋友**，以上不構成實質風險。**若要公開發布
 給不特定人下載**，建議至少：

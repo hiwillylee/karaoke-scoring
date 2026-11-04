@@ -299,6 +299,63 @@ select {
   100% { opacity: 0; transform: translate(-50%, -20px) scale(1); }
 }
 
+/* ── 歌詞（KTV） ── */
+.lyrics-panel {
+  --sung: var(--cyan);
+  --unsung: rgba(233, 236, 245, .92);
+  margin-top: 10px; min-height: 128px; padding: 12px 18px;
+  display: flex; flex-direction: column; justify-content: center; gap: 6px;
+  background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius);
+  text-align: center; overflow: hidden;
+}
+.lyrics-panel.hidden-lyrics { display: none; }
+.lyrics-panel.empty { min-height: 0; padding: 10px 18px; }
+.lyrics-panel.compact { min-height: 96px; margin: 8px 0 10px; }
+.lyr-empty, .lyr-note { color: var(--muted); font-size: 13px; }
+.lyr-line { line-height: 1.25; }
+.lyr-line ruby { ruby-position: over; }
+.lyr-line rt { font-size: .42em; letter-spacing: .02em; color: var(--muted); }
+.lyr-line.big .lyr-text {
+  font-size: clamp(22px, 3.4vw, 38px); font-weight: 700; letter-spacing: .03em;
+  color: var(--unsung); opacity: .62; transition: opacity .2s;
+}
+.lyr-line.big.active .lyr-text { opacity: 1; }
+.lyr-line.big.interlude .lyr-text { color: var(--muted); }
+.lyr-line.big.wipe .ch {
+  --p: 0%;
+  background-image: linear-gradient(90deg, var(--sung) 0 var(--p), var(--unsung) var(--p) 100%);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent; -webkit-text-fill-color: transparent;
+}
+.lyr-line.big.wipe.active .lyr-text { filter: drop-shadow(0 0 10px rgba(0, 229, 255, .28)); }
+.lyr-line.big.wipe ruby.sung rt { color: var(--sung); }
+.lyr-line.next .lyr-text { font-size: clamp(15px, 2vw, 21px); color: var(--muted); }
+.lyr-romaji { font-size: 13px; color: var(--muted); letter-spacing: .04em; margin-top: 2px; }
+.lyr-line.big .lyr-romaji { font-size: 15px; }
+.lyrics-panel.compact .lyr-line.big .lyr-text { font-size: clamp(18px, 2.4vw, 26px); }
+.lyr-plain { max-height: 220px; overflow-y: auto; text-align: left; font-size: 15px; line-height: 1.9; }
+.lyr-plain rt { font-size: .5em; color: var(--muted); }
+.lyrics-card h3 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.lyrics-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lyrics-offset { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+#lyrics-offset-value { min-width: 64px; text-align: center; font-variant-numeric: tabular-nums; color: var(--cyan); }
+.lyrics-more { margin-top: 10px; }
+.lyrics-more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.lyrics-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.lyrics-form label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.lyrics-form label.grow { flex: 1 1 260px; }
+.lyrics-form input {
+  font: inherit; font-size: 14px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; min-width: 0; width: 100%;
+}
+.lyrics-form label:not(.grow) input { width: 180px; }
+.lyrics-log {
+  max-height: 200px; overflow: auto; font-size: 11px; line-height: 1.5; white-space: pre-wrap;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; color: var(--muted);
+}
+#lyrics-toggle.on { color: var(--cyan); border-color: rgba(0, 229, 255, .5); }
+.song-card .lyr-tag { margin-left: 6px; font-size: 11px; color: var(--cyan); opacity: .8; }
+
 .sing-foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
 .sing-foot .row { margin-top: 0; }
 .pitch-hint { font-size: 17px; font-weight: 700; letter-spacing: .16em; min-width: 130px; }
@@ -458,4 +515,10 @@ select {
   /* 導覽卡片要避開底部導覽列 */
   .tour-card { bottom: calc(84px + env(safe-area-inset-bottom)); }
   select { width: 100%; }
+
+  /* 演唱畫面：音程條讓一點高度給歌詞，兩者都要看得到 */
+  #stage { height: min(40vh, 340px); }
+  .lyrics-panel { min-height: 108px; padding: 10px 12px; }
+  .lyrics-offset { margin-left: 0; }
+  .lyrics-form label, .lyrics-form label:not(.grow) input { width: 100%; }
 }
