@@ -79,7 +79,9 @@ packaging/build_macos.sh          # → build/唱歌評分-1.0.0.dmg
 這兩個 QR 與公開網址的開關**只在這台電腦上看得到**——手機是掃碼進來的，不需要再看一次，
 而把機器公開到網際網路這種事也不該讓連進來的人代為決定。
 
-需要 `cloudflared` 才能建立公開網址（`brew install cloudflared` / `winget install Cloudflare.cloudflared`）。
+公開網址靠 `cloudflared`。這台電腦沒裝的話，**第一次按「建立公開網址」會自動從 Cloudflare 官方下載**
+（GitHub Releases，比對官方 SHA-256 後才使用），放在資料目錄的 `tools/` 下，之後不必再下載；
+已經用 `brew install cloudflared` / `winget install Cloudflare.cloudflared` 裝過的話優先用系統那份。
 
 > **公開網址沒有任何密碼**，拿到網址的人就能瀏覽曲庫、加歌、刪歌。只分享給信任的人，
 > 用完請按「關閉公開網址」。關掉程式時也會自動收掉。

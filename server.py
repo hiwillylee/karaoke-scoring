@@ -73,7 +73,7 @@ JOBS_LOCK = threading.Lock()
 JOB_QUEUE: "queue.Queue[dict]" = queue.Queue()
 
 LIBRARY = library.Library(LIBRARY_DIR)
-TUNNEL = tunnel_mod.Tunnel()
+TUNNEL = tunnel_mod.Tunnel(DATA_DIR / "tools")   # 沒裝 cloudflared 時自動下載到這裡
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
 

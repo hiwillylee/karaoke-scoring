@@ -1832,6 +1832,20 @@ async function refreshTunnel() {
   const box = $('#qr-tunnel');
   const urlEl = $('#qr-tunnel-url');
 
+  if (!st.available && st.canInstall) {
+    // 第一次按的時候伺服器會自己從 Cloudflare 官方下載，不必先打指令
+    btn.disabled = !!st.installing;
+    btn.classList.remove('on');
+    btn.textContent = st.installing ? '下載中…' : '建立公開網址';
+    note.innerHTML = '第一次使用會自動從 Cloudflare 官方下載 cloudflared（約 20～55MB，驗證校驗值後才使用），之後就不必再下載。'
+      + `也可以自己安裝：<code>${escapeHtml(st.installHint || '')}</code>`;
+    box.innerHTML = `<div class="qr-empty">${st.installing
+      ? `下載 cloudflared 中… ${Math.round((st.installProgress || 0) * 100)}%`
+      : escapeHtml(st.error || '尚未建立')}</div>`;
+    urlEl.textContent = st.error || '';
+    return;
+  }
+
   if (!st.available) {
     btn.disabled = true;
     btn.textContent = '需要 cloudflared';
@@ -1864,12 +1878,23 @@ $('#tunnel-toggle').addEventListener('click', async () => {
   if (!running) {
     $('#qr-tunnel').innerHTML = '<div class="qr-empty">向 Cloudflare 申請中，約需 10 秒…</div>';
   }
+  // 第一次要先下載 cloudflared，這段時間輪詢狀態顯示下載進度
+  const needsInstall = !running && state.tunnel && !state.tunnel.available;
+  const poll = needsInstall ? setInterval(async () => {
+    try {
+      const st = await fetch('api/tunnel', { cache: 'no-store' }).then((r) => r.json());
+      $('#qr-tunnel').innerHTML = st.installing
+        ? `<div class="qr-empty">第一次使用，下載 cloudflared 中… ${Math.round((st.installProgress || 0) * 100)}%</div>`
+        : '<div class="qr-empty">向 Cloudflare 申請中，約需 10 秒…</div>';
+    } catch { /* 下一輪再試 */ }
+  }, 500) : null;
   try {
     state.tunnel = await fetch(`api/tunnel/${running ? 'stop' : 'start'}`,
       { method: 'POST' }).then((r) => r.json());
   } catch (err) {
     state.tunnel = { available: true, running: false, error: String(err.message || err) };
   }
+  if (poll) clearInterval(poll);
   btn.disabled = false;
   refreshTunnel();
 });
