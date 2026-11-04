@@ -23,7 +23,7 @@ param(
   [ValidateSet('cuda', 'cpu', 'xpu', 'directml')]
   [string]$Backend = 'cpu',
   [string]$CudaTag = 'cu126',
-  [string]$Version = '2.0.1'
+  [string]$Version = '2.1.0'
 )
 
 $ErrorActionPreference = 'Stop'
