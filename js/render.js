@@ -69,6 +69,16 @@ const FUTURE_MS = 3500;
 const JUDGE_RATIO = PAST_MS / (PAST_MS + FUTURE_MS);
 const HIT_CENTS = 50;
 const MAX_TRAIL_JUMP = 5;   // 相鄰音框超過 5 半音就不連線
+const TRAIL_GAP_MS = 120;   // 音框間隔超過這麼久（換氣、沒聲音）就斷線
+
+// 音準線的顯示平滑（只影響畫面，評分用的是原始音高）：
+// 先取最近 3 框的中位數去掉單框尖刺，再做自適應的指數平滑——
+// 小幅抖動（< 0.3 半音）壓得很平，真的換音（差好幾個半音）時幾乎立刻跟上，
+// 線才不會在音與音之間拖出一條慢吞吞的斜坡。
+const SMOOTH_MIN = 0.22;
+const SMOOTH_MAX = 0.85;
+// 準／不準的顏色要連續這麼多框才切換，避免邊界上一閃一閃
+const HIT_HOLD_FRAMES = 4;
 
 const BLACK_KEYS = new Set([1, 3, 6, 8, 10]);
 
@@ -110,13 +120,37 @@ export class StageRenderer {
 
   /** midi 為已做八度對齊後的使用者音高；hit 由呼叫端判定。 */
   pushUserFrame(t, midi, hit) {
-    this.trail.push({ t, midi, hit });
+    const last = this.trail[this.trail.length - 1];
+    const continuous = last && t - last.t < TRAIL_GAP_MS && Math.abs(midi - last.raw) < MAX_TRAIL_JUMP;
+    if (!continuous) {
+      this.recentRaw = [midi];
+      this.hitRun = { value: hit, pending: hit, count: 0 };
+      this.trail.push({ t, midi, raw: midi, hit });
+    } else {
+      this.recentRaw.push(midi);
+      if (this.recentRaw.length > 3) this.recentRaw.shift();
+      const med = [...this.recentRaw].sort((a, b) => a - b)[Math.floor(this.recentRaw.length / 2)];
+      const diff = med - last.midi;
+      const a = Math.min(SMOOTH_MAX, SMOOTH_MIN + Math.abs(diff) * 0.35);
+      this.trail.push({ t, midi: last.midi + diff * a, raw: midi, hit: this.debounceHit(hit) });
+    }
     const cutoff = t - (PAST_MS + 500);
     while (this.trail.length && this.trail[0].t < cutoff) this.trail.shift();
   }
 
+  /** 準／不準要連續 HIT_HOLD_FRAMES 框才改顏色。 */
+  debounceHit(hit) {
+    const run = this.hitRun;
+    if (hit === run.value) { run.count = 0; return run.value; }
+    if (hit === run.pending) run.count++;
+    else { run.pending = hit; run.count = 1; }
+    if (run.count >= HIT_HOLD_FRAMES) { run.value = hit; run.count = 0; }
+    return run.value;
+  }
+
   clearTrail() {
     this.trail = [];
+    this.recentRaw = [];
   }
 
   /**
@@ -127,7 +161,8 @@ export class StageRenderer {
    */
   shiftTrail(deltaSemitones) {
     if (!deltaSemitones) return;
-    for (const p of this.trail) p.midi += deltaSemitones;
+    for (const p of this.trail) { p.midi += deltaSemitones; p.raw += deltaSemitones; }
+    if (this.recentRaw) this.recentRaw = this.recentRaw.map((m) => m + deltaSemitones);
   }
 
   yOf(midi) {
@@ -258,30 +293,42 @@ export class StageRenderer {
 
   drawTrail(nowMs) {
     const ctx = this.ctx;
-    if (this.trail.length < 2) return;
-    ctx.lineWidth = 3;
+    const trail = this.trail;
+    if (trail.length < 2) return;
+    ctx.lineWidth = 3.5;
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
 
+    const joined = (k) => trail[k].t - trail[k - 1].t < TRAIL_GAP_MS &&
+      Math.abs(trail[k].midi - trail[k - 1].midi) < MAX_TRAIL_JUMP;
+
     let i = 0;
-    while (i < this.trail.length - 1) {
-      const hit = this.trail[i].hit;
-      ctx.beginPath();
-      ctx.moveTo(this.xOf(this.trail[i].t, nowMs), this.yOf(this.trail[i].midi));
+    while (i < trail.length - 1) {
+      const hit = trail[i].hit;
+      // 同一種顏色、沒有斷開的一段 [i, j)
       let j = i + 1;
-      // 時間斷開或音高突然跳很遠時就斷線，避免畫出貫穿整個畫面的假尖刺
-      while (j < this.trail.length && this.trail[j].hit === hit &&
-             this.trail[j].t - this.trail[j - 1].t < 120 &&
-             Math.abs(this.trail[j].midi - this.trail[j - 1].midi) < MAX_TRAIL_JUMP) {
-        ctx.lineTo(this.xOf(this.trail[j].t, nowMs), this.yOf(this.trail[j].midi));
-        j++;
+      while (j < trail.length && trail[j].hit === hit && joined(j)) j++;
+      // 換顏色的地方多畫一點接到下一段的第一個點，兩色才不會中間留縫
+      const end = j < trail.length && trail[j].hit !== hit && joined(j) ? j : j - 1;
+      if (end > i) {
+        const pts = [];
+        for (let k = i; k <= end; k++) pts.push([this.xOf(trail[k].t, nowMs), this.yOf(trail[k].midi)]);
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        // 經過相鄰兩點中點的二次曲線：線條連續、沒有折角
+        for (let k = 1; k < pts.length - 1; k++) {
+          const mx = (pts[k][0] + pts[k + 1][0]) / 2;
+          const my = (pts[k][1] + pts[k + 1][1]) / 2;
+          ctx.quadraticCurveTo(pts[k][0], pts[k][1], mx, my);
+        }
+        ctx.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+        ctx.strokeStyle = cssVar(hit ? '--cv-hit' : '--cv-miss');
+        ctx.shadowColor = ctx.strokeStyle;
+        ctx.shadowBlur = 10;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
       }
-      ctx.strokeStyle = cssVar(hit ? '--cv-hit' : '--cv-miss');
-      ctx.shadowColor = ctx.strokeStyle;
-      ctx.shadowBlur = 10;
-      ctx.stroke();
-      ctx.shadowBlur = 0;
-      i = j - 1 > i ? j - 1 : i + 1;
+      i = j;
     }
   }
 
