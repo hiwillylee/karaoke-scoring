@@ -283,7 +283,9 @@ def auto_cover(song_id: str, thumbnail: str | None = None) -> dict | None:
 def backfill_covers() -> None:
     """舊版曲庫的歌沒有封面：啟動後在背景補，一首一首慢慢來。"""
     for meta in LIBRARY.list():
-        if LIBRARY.cover_path(meta["id"]) or meta.get("coverTried") or not meta.get("sourceId"):
+        tried = meta.get("coverTried")
+        if (LIBRARY.cover_path(meta["id"]) or not meta.get("sourceId")
+                or (tried and int(tried) >= library.COVER_LOGIC_VERSION)):   # 舊版存的是 True（=1）
             continue
         got = auto_cover(meta["id"])
         print(f"[cover] {meta.get('name')}：{'已補上' if got else '找不到'}", flush=True)

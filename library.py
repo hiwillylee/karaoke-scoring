@@ -25,6 +25,9 @@ from pathlib import Path
 
 STEMS = {"instrumental": "instrumental.m4a", "vocals": "vocals.m4a"}
 COVER_TYPES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+# 找封面的邏輯改進時加一，舊版判定「找不到」的歌會在下次啟動時重找
+# （2：Bilibili 等非 YouTube 來源也會去問 yt-dlp 要縮圖）
+COVER_LOGIC_VERSION = 2
 ID_RE = re.compile(r"^[0-9a-z]{6,32}$")
 
 
@@ -234,7 +237,7 @@ class Library:
         """自動找過但找不到：記下來，避免每次啟動都重找。"""
         meta = self.meta(song_id)
         if meta is not None:
-            meta["coverTried"] = True
+            meta["coverTried"] = COVER_LOGIC_VERSION
             self._write_meta(song_id, meta)
 
     def _write_meta(self, song_id: str, meta: dict) -> None:

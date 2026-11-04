@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import platform
 import re
@@ -40,7 +39,10 @@ INSTALL_HINT = {
 }
 
 
-RELEASE_API = "https://api.github.com/repos/cloudflare/cloudflared/releases/latest"
+# 刻意不用 GitHub API：沒登入的 API 每個 IP 每小時只有 60 次，同一個網路的人
+# 共用額度，很容易就 403 rate limit exceeded。改走一般網頁與下載網址，沒有這個限制。
+RELEASES = "https://github.com/cloudflare/cloudflared/releases"
+UA = "Mozilla/5.0 (karaoke-scoring)"
 
 
 def release_asset_name() -> str | None:
@@ -56,13 +58,18 @@ def release_asset_name() -> str | None:
     return None
 
 
-def _expected_sha256(release: dict, asset: dict) -> str | None:
-    """官方公布的 SHA-256：GitHub 資產的 digest 欄位，沒有就從發布說明的校驗表找。"""
-    digest = asset.get("digest") or ""
-    if digest.startswith("sha256:"):
-        return digest.split(":", 1)[1].lower()
-    m = re.search(re.escape(asset["name"]) + r":\s*([0-9a-f]{64})", release.get("body") or "", re.I)
+def expected_sha256(page: str, name: str) -> str | None:
+    """發布頁內文的校驗表（「檔名: sha256」）。
+
+    注意 .tgz 那一列是**解壓後執行檔**的雜湊，不是壓縮檔本身的——
+    所以要解開之後再比對，其餘平台的檔案本身就是執行檔。
+    """
+    m = re.search(re.escape(name) + r":\s*([0-9a-f]{64})", page, re.I)
     return m.group(1).lower() if m else None
+
+
+def _get(url: str, timeout: float = 30):
+    return urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout)
 
 
 class Tunnel:
@@ -128,23 +135,18 @@ class Tunnel:
         self.installing = True
         self.install_progress = 0.0
         try:
-            headers = {"User-Agent": "karaoke-scoring", "Accept": "application/vnd.github+json"}
-            with urllib.request.urlopen(urllib.request.Request(RELEASE_API, headers=headers),
-                                        timeout=30) as resp:
-                release = json.load(resp)
-            asset = next((a for a in release.get("assets", []) if a.get("name") == name), None)
-            if asset is None:
-                raise RuntimeError(f"Cloudflare 的最新版本裡沒有 {name}")
-            expected = _expected_sha256(release, asset)
+            # /releases/latest 會轉址到 /releases/tag/<版本>，那一頁的內文就是官方校驗表
+            with _get(f"{RELEASES}/latest") as resp:
+                tag = resp.geturl().rstrip("/").rsplit("/", 1)[-1]
+                page = resp.read().decode("utf-8", "replace")
+            expected = expected_sha256(page, name)
             if not expected:
                 # 沒有官方校驗值就不裝：這個檔會被拿來執行，不能憑空相信
                 raise RuntimeError("找不到官方公布的校驗值，為了安全不自動安裝")
 
-            req = urllib.request.Request(asset["browser_download_url"],
-                                         headers={"User-Agent": "karaoke-scoring"})
-            total = int(asset.get("size") or 0)
             buf = io.BytesIO()
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with _get(f"{RELEASES}/download/{tag}/{name}", timeout=60) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
                 while True:
                     chunk = resp.read(1 << 16)
                     if not chunk:
@@ -153,8 +155,6 @@ class Tunnel:
                     if total:
                         self.install_progress = min(0.99, buf.tell() / total)
             data = buf.getvalue()
-            if hashlib.sha256(data).hexdigest() != expected:
-                raise RuntimeError("下載的 cloudflared 校驗值不符，已捨棄")
 
             if name.endswith(".tgz"):
                 with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
@@ -163,6 +163,8 @@ class Tunnel:
                     if member is None:
                         raise RuntimeError("壓縮檔裡沒有 cloudflared")
                     data = tar.extractfile(member).read()  # type: ignore[union-attr]
+            if hashlib.sha256(data).hexdigest() != expected:
+                raise RuntimeError("下載的 cloudflared 校驗值不符，已捨棄")
 
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp = target.with_suffix(target.suffix + ".part")
@@ -170,7 +172,7 @@ class Tunnel:
             tmp.chmod(0o755)
             os.replace(tmp, target)
             self.install_progress = 1.0
-            print(f"[tunnel] 已安裝 cloudflared {release.get('tag_name', '')} → {target}", flush=True)
+            print(f"[tunnel] 已安裝 cloudflared {tag} → {target}", flush=True)
             return str(target)
         finally:
             self.installing = False

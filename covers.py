@@ -110,6 +110,13 @@ def fetch_for(meta: dict, thumbnail: str | None = None) -> bytes | None:
         data = youtube_cover(sid.split(":", 1)[1])
         if data:
             return data
+    if not thumbnail and meta.get("sourceUrl"):
+        # Bilibili 等其他平台：曲庫沒存縮圖網址（舊版或重抓時），問 yt-dlp 要一次
+        try:
+            import fetcher
+            thumbnail = fetcher.probe(meta["sourceUrl"]).get("thumbnail")
+        except Exception:  # noqa: BLE001
+            thumbnail = None
     if thumbnail:
         return _download(thumbnail)
     return None

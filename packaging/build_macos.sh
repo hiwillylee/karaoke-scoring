@@ -11,7 +11,7 @@ PROJ="$PWD"
 
 APP_NAME="唱歌評分"
 BUNDLE_ID="com.karaoke.scoring"
-VERSION="${VERSION:-2.0.0}"
+VERSION="${VERSION:-2.0.1}"
 BUILD="$PROJ/build"
 APP="$BUILD/$APP_NAME.app"
 RES="$APP/Contents/Resources"
