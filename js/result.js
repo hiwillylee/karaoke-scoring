@@ -1,5 +1,6 @@
 // result.js — 結算畫面：分數動畫、五角雷達圖、整曲音程對照圖。
 
+import { cssVar } from './theme.js';
 import { noteRange, midiToName } from './chart.js';
 import { TECHNIQUE_LABELS } from './techniques.js';
 
@@ -55,7 +56,7 @@ export function drawRadar(canvas, breakdown) {
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
     ctx.closePath();
-    ctx.strokeStyle = 'rgba(0,229,255,0.14)';
+    ctx.strokeStyle = cssVar('--cv-grid');
     ctx.lineWidth = 1;
     ctx.stroke();
   }
@@ -64,7 +65,7 @@ export function drawRadar(canvas, breakdown) {
     ctx.beginPath();
     ctx.moveTo(cx, cy);
     ctx.lineTo(cx + Math.cos(a) * radius, cy + Math.sin(a) * radius);
-    ctx.strokeStyle = 'rgba(0,229,255,0.12)';
+    ctx.strokeStyle = cssVar('--cv-grid');
     ctx.stroke();
   }
 
@@ -79,13 +80,15 @@ export function drawRadar(canvas, breakdown) {
   });
   ctx.closePath();
   const grad = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius);
-  grad.addColorStop(0, 'rgba(0,229,255,0.42)');
-  grad.addColorStop(1, 'rgba(255,43,214,0.42)');
+  grad.addColorStop(0, cssVar('--cv-ref'));
+  grad.addColorStop(1, cssVar('--cv-user'));
   ctx.fillStyle = grad;
+  ctx.globalAlpha = 0.42;
   ctx.fill();
-  ctx.strokeStyle = '#00e5ff';
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = cssVar('--cv-ref');
   ctx.lineWidth = 2;
-  ctx.shadowColor = 'rgba(0,229,255,0.7)';
+  ctx.shadowColor = cssVar('--cv-ref');
   ctx.shadowBlur = 12;
   ctx.stroke();
   ctx.shadowBlur = 0;
@@ -98,9 +101,9 @@ export function drawRadar(canvas, breakdown) {
     const a = angle(i);
     const x = cx + Math.cos(a) * (radius + 20);
     const y = cy + Math.sin(a) * (radius + 18);
-    ctx.fillStyle = 'rgba(255,255,255,0.72)';
+    ctx.fillStyle = cssVar('--cv-text');
     ctx.fillText(axis.label, x, y - 7);
-    ctx.fillStyle = '#00e5ff';
+    ctx.fillStyle = cssVar('--cv-ref');
     ctx.font = 'bold 12px ui-monospace, monospace';
     ctx.fillText(`${(breakdown[axis.key] || 0).toFixed(0)}`, x, y + 8);
     ctx.font = '12px "Noto Sans TC", sans-serif';
@@ -131,25 +134,27 @@ export function drawPitchCompare(canvas, chart, result) {
   for (let m = Math.ceil(range.min); m <= range.max; m++) {
     if (((m % 12) + 12) % 12 !== 0) continue;
     const y = yOf(m);
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.strokeStyle = cssVar('--cv-grid');
     ctx.beginPath();
     ctx.moveTo(padL, y);
     ctx.lineTo(w - padR, y);
     ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fillStyle = cssVar('--cv-label');
     ctx.fillText(midiToName(m), padL - 5, y);
   }
 
   // 參考譜
+  ctx.fillStyle = cssVar('--cv-ref');
+  ctx.globalAlpha = 0.55;
   for (const note of notes) {
     const y = yOf(note.midi + shift);
-    ctx.fillStyle = 'rgba(0,229,255,0.55)';
     ctx.fillRect(xOf(note.startMs), y - 2, Math.max(1.5, xOf(note.endMs) - xOf(note.startMs)), 4);
   }
+  ctx.globalAlpha = 1;
 
   // 實唱
   const oct = result.octaveOffset || 0;
-  ctx.strokeStyle = 'rgba(255,43,214,0.9)';
+  ctx.strokeStyle = cssVar('--cv-user');
   ctx.lineWidth = 1.4;
   ctx.beginPath();
   let pen = false;

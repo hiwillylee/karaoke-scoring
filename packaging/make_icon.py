@@ -1,6 +1,6 @@
 """make_icon.py — 產生應用程式圖示（不依賴 Pillow，用 numpy 直接畫像素）。
 
-畫面是深色圓角底 + 青色的音程條，跟程式介面同一套視覺。
+畫面是緋紅圓角底 + 白色音程條與金色的實唱線，跟網頁的分頁圖示同一個造型。
 輸出 icon.iconset/ 之後由 iconutil 轉成 .icns。
 """
 
@@ -13,10 +13,10 @@ from pathlib import Path
 
 import numpy as np
 
-BG = (0x0B, 0x0B, 0x14)
-CYAN = (0x00, 0xE5, 0xFF)
-MAGENTA = (0xFF, 0x2B, 0xD6)
-GOLD = (0xFF, 0xD5, 0x4A)
+BG = (0xD7, 0x26, 0x3D)        # 介面主色（淺色主題的 --brand）
+BG_DEEP = (0xA8, 0x16, 0x2C)
+WHITE = (0xFF, 0xFF, 0xFF)
+GOLD = (0xFF, 0xC8, 0x3D)
 
 
 def write_png(path: Path, rgba: np.ndarray) -> None:
@@ -48,11 +48,11 @@ def draw(size: int) -> np.ndarray:
     img = np.zeros((size, size, 4), dtype=np.float64)
     s = size / 512.0
 
-    # 底色帶一點對角光暈
+    # 由左上到右下的淡淡漸層
     y, x = np.mgrid[0:size, 0:size].astype(np.float64)
-    glow = np.clip(1.2 - (x + y) / (size * 1.6), 0, 1)
-    for i, c in enumerate(BG):
-        img[:, :, i] = c + glow * 26
+    t = np.clip((x + y) / (2 * size), 0, 1)
+    for i in range(3):
+        img[:, :, i] = BG[i] * (1 - t) + BG_DEEP[i] * t
 
     def bar(x0, y0, w, h, color, alpha=1.0):
         xs = slice(int(x0 * s), int((x0 + w) * s))
@@ -60,18 +60,23 @@ def draw(size: int) -> np.ndarray:
         for i, c in enumerate(color):
             img[ys, xs, i] = img[ys, xs, i] * (1 - alpha) + c * alpha
 
-    # 音程條：高低錯落的橫條，像譜面畫面
-    bars = [(96, 300, 96, 30), (208, 232, 120, 30), (344, 288, 80, 30),
-            (128, 176, 72, 30), (240, 348, 88, 30)]
-    for bx, by, bw, bh in bars:
-        bar(bx, by, bw, bh, CYAN, 0.92)
+    def pill(x0, y0, w, h, color, alpha=1.0):
+        """圓頭長條，邊緣抗鋸齒（距離場算覆蓋率）。"""
+        r = h / 2
+        px, py = (x + 0.5) / s, (y + 0.5) / s
+        cx = np.clip(px, x0 + r, x0 + w - r)
+        cover = np.clip((r - np.hypot(px - cx, py - (y0 + r))) * s + 0.5, 0, 1) * alpha
+        for i, c in enumerate(color):
+            img[:, :, i] = img[:, :, i] * (1 - cover) + c * cover
 
-    # 實唱線（洋紅）與命中處（金）
-    bar(96, 256, 330, 10, MAGENTA, 0.85)
-    bar(208, 256, 120, 10, GOLD, 0.95)
+    bar = pill  # noqa: F811  音程條都用圓頭
 
-    # 判定線
-    bar(250, 120, 6, 300, (255, 255, 255), 0.35)
+    # 音程條：高低錯落的白色橫條（與分頁圖示同一個構圖）
+    for bx, by, bw, alpha in [(96, 270, 112, 0.9), (224, 176, 128, 1.0), (368, 240, 64, 0.9)]:
+        bar(bx, by, bw, 54, WHITE, alpha)
+
+    # 實唱線（金）
+    bar(96, 372, 320, 34, GOLD, 1.0)
 
     img[:, :, 3] = 255
     alpha = rounded_mask(size)

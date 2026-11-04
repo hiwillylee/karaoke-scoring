@@ -16,6 +16,7 @@ import { ChartEditor } from './editor.js';
 import * as api from './api.js';
 import { Tour } from './tour.js';
 import { LyricsView, describeLyrics } from './lyrics.js';
+import { applyTheme, onThemeChange } from './theme.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -1447,6 +1448,7 @@ async function finishSinging() {
 // ── 結算 ────────────────────────────────────────────────────
 
 async function showResult(res) {
+  state.lastResult = res;
   show('result');
   setCover($('#result-cover'), state.song);
   setBackdrop($('#result-backdrop'), state.song);
@@ -1711,6 +1713,31 @@ $('#silence-slider').addEventListener('input', async (e) => {
 });
 
 $('#settings-back').addEventListener('click', () => show('library'));
+
+// ── 外觀（跟隨系統／淺色／深色）─────────────────────────────
+
+function setThemePref(pref) {
+  applyTheme(pref);
+  // 頁首的小段腳本在樣式載入前讀這個值，避免開頁時先閃一下另一種顏色
+  try { localStorage.setItem('theme', pref); } catch { /* 私密模式等讀寫不了就算了 */ }
+  $$('#theme-switch button').forEach((b) => b.classList.toggle('on', b.dataset.themePref === pref));
+}
+
+$('#theme-switch').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-theme-pref]');
+  if (!btn) return;
+  setThemePref(btn.dataset.themePref);
+  await store.setSetting('theme', btn.dataset.themePref);
+});
+
+// 畫布不會自己跟著 CSS 變色：結算圖表畫一次就不動了，主題一換要重畫。
+// 演唱畫面每一幀都重畫，不用另外處理。
+onThemeChange(() => {
+  const res = state.lastResult;
+  if (!res || !$('#screen-result').classList.contains('active')) return;
+  result.drawRadar($('#radar'), res.breakdown);
+  result.drawPitchCompare($('#compare'), state.chart, res);
+});
 
 // ── 封面（譜面頁的更換／重抓） ─────────────────────────────────
 
@@ -2250,6 +2277,7 @@ function showQuitNotice() {
   state.silenceRms = await store.getSetting('silenceRms', 0.008);
   state.guideOn = await store.getSetting('guideVocal', false);
   applyGuide(state.guideOn);
+  setThemePref(await store.getSetting('theme', 'auto'));
   state.lyricsPrefs = { ...state.lyricsPrefs, ...(await store.getSetting('lyricsPrefs', {})) };
   applyLyricsPrefs();
   $('#manual-latency').value = state.manualLatencyMs;

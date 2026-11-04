@@ -3,8 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<script>
+  // 外觀設定在樣式載入前就套上，避免先閃一下另一種顏色（js/theme.js 會同步寫這個值）
+  try { const t = localStorage.getItem('theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+</script>
 <title>カラオケ 精密採點</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2307070d'/%3E%3Ctext x='16' y='23' font-size='19' text-anchor='middle' fill='%2300e5ff'%3E%E2%99%AA%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23d7263d'/%3E%3Crect x='6' y='18' width='7' height='3.4' rx='1.7' fill='%23fff' opacity='.9'/%3E%3Crect x='14' y='12' width='8' height='3.4' rx='1.7' fill='%23fff'/%3E%3Crect x='22.5' y='16' width='4' height='3.4' rx='1.7' fill='%23fff' opacity='.9'/%3E%3Crect x='6' y='23.5' width='20' height='2.2' rx='1.1' fill='%23ffc83d'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -199,7 +204,7 @@
 </section>
 
 <!-- ── 演唱 ───────────────────────────────────────────────── -->
-<section id="screen-sing" class="screen sing monitor">
+<section id="screen-sing" class="screen sing stage-screen">
   <div class="backdrop" id="sing-backdrop"></div>
   <div class="sing-head">
     <div class="sing-row title-row">
@@ -237,7 +242,7 @@
 </section>
 
 <!-- ── 結算 ───────────────────────────────────────────────── -->
-<section id="screen-result" class="screen monitor">
+<section id="screen-result" class="screen stage-screen">
   <div class="backdrop" id="result-backdrop"></div>
   <div class="result-head">
     <canvas id="particles" class="particles"></canvas>
@@ -378,6 +383,14 @@
       <output id="silence-value">0.008</output>
     </label>
     <p class="muted small">環境吵雜時調高，避免雜音被當成歌聲。</p>
+  </div>
+  <div class="card">
+    <h3>外觀</h3>
+    <div class="segmented" id="theme-switch">
+      <button data-theme-pref="auto">跟隨系統</button>
+      <button data-theme-pref="light">淺色</button>
+      <button data-theme-pref="dark">深色</button>
+    </div>
   </div>
   <div class="card">
     <h3>歌詞顯示</h3>

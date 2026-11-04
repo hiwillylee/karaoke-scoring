@@ -10,6 +10,7 @@
 
 import { midiToName } from './chart.js';
 import { techniqueColor } from './techniques.js';
+import { cssVar } from './theme.js';
 
 // 一個音同時標到多種技巧時，長條顏色取這個順序的第一個
 // （ビブラート影響整個音，最能代表這個音的唱法）。符號則是全部都畫。
@@ -178,16 +179,18 @@ export class StageRenderer {
     for (let m = Math.ceil(min); m <= Math.floor(max); m++) {
       const y = this.yOf(m + 0.5);
       const pc = ((m % 12) + 12) % 12;
-      ctx.fillStyle = BLACK_KEYS.has(pc) ? 'rgba(160,190,255,0.045)' : 'rgba(255,255,255,0.0)';
-      ctx.fillRect(0, y, this.w, semiH);
+      if (BLACK_KEYS.has(pc)) {
+        ctx.fillStyle = cssVar('--cv-key');
+        ctx.fillRect(0, y, this.w, semiH);
+      }
       if (pc === 0) {
-        ctx.strokeStyle = 'rgba(160,190,255,0.22)';
+        ctx.strokeStyle = cssVar('--cv-octave');
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(0, y + semiH);
         ctx.lineTo(this.w, y + semiH);
         ctx.stroke();
-        ctx.fillStyle = 'rgba(190,210,255,0.6)';
+        ctx.fillStyle = cssVar('--cv-label');
         ctx.font = '11px ui-monospace, monospace';
         ctx.textAlign = 'right';
         ctx.fillText(midiToName(m), this.w - 6, y + semiH - 4);
@@ -216,10 +219,10 @@ export class StageRenderer {
       const techs = this.techByNote.get(i);
       const fill = techs
         ? techniqueColor(techs[0], passed ? 0.22 : 0.45)
-        : (passed ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.26)');
+        : cssVar(passed ? '--cv-note-fill-past' : '--cv-note-fill');
       const stroke = techs
         ? techniqueColor(techs[0], passed ? 0.35 : 0.95)
-        : (passed ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.9)');
+        : cssVar(passed ? '--cv-note-stroke-past' : '--cv-note-stroke');
 
       ctx.fillStyle = fill;
       roundRect(ctx, x0, y, width, barH, barH / 2);
@@ -249,11 +252,8 @@ export class StageRenderer {
     const ctx = this.ctx;
     const x = this.w * JUDGE_RATIO;
     const grad = ctx.createLinearGradient(x - 2, 0, x + 2, 0);
-    grad.addColorStop(0, 'rgba(255,255,255,0)');
-    grad.addColorStop(0.5, 'rgba(255,255,255,0.75)');
-    grad.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(x - 2, 0, 4, this.h);
+    ctx.fillStyle = cssVar('--cv-judge');
+    ctx.fillRect(x - 1, 0, 2, this.h);
   }
 
   drawTrail(nowMs) {
@@ -276,8 +276,8 @@ export class StageRenderer {
         ctx.lineTo(this.xOf(this.trail[j].t, nowMs), this.yOf(this.trail[j].midi));
         j++;
       }
-      ctx.strokeStyle = hit ? '#ffd23f' : '#ff4f8b';
-      ctx.shadowColor = hit ? 'rgba(255,210,63,0.95)' : 'rgba(255,79,139,0.8)';
+      ctx.strokeStyle = cssVar(hit ? '--cv-hit' : '--cv-miss');
+      ctx.shadowColor = ctx.strokeStyle;
       ctx.shadowBlur = 10;
       ctx.stroke();
       ctx.shadowBlur = 0;
@@ -297,17 +297,17 @@ export class StageRenderer {
     ctx.lineTo(x - 17, y - 9);
     ctx.lineTo(x - 17, y + 9);
     ctx.closePath();
-    ctx.fillStyle = last.hit ? '#ffd23f' : '#ff4f8b';
+    ctx.fillStyle = cssVar(last.hit ? '--cv-hit' : '--cv-miss');
     ctx.shadowColor = ctx.fillStyle;
     ctx.shadowBlur = 16;
     ctx.fill();
     ctx.shadowBlur = 0;
     ctx.lineWidth = 1.5;
-    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.strokeStyle = cssVar('--cv-cursor-edge');
     ctx.stroke();
 
     if (opts.showNoteName !== false) {
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillStyle = cssVar('--cv-text');
       ctx.font = '12px ui-monospace, monospace';
       ctx.textAlign = 'left';
       ctx.fillText(midiToName(last.midi), x + 12, y - 10);
