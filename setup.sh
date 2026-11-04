@@ -23,7 +23,7 @@ echo "==> 建立 .venv"
 uv venv --python 3.12 .venv
 
 echo "==> 安裝依賴（torch 約 2.5GB，第一次會跑一陣子）"
-VIRTUAL_ENV="$PWD/.venv" uv pip install torch torchaudio demucs torchcrepe librosa soundfile numpy scipy cryptography segno "yt-dlp[default]"
+VIRTUAL_ENV="$PWD/.venv" uv pip install torch torchaudio demucs torchcrepe librosa soundfile numpy scipy cryptography segno pykakasi "yt-dlp[default]"
 
 echo "==> 檢查安裝"
 .venv/bin/python - <<'PYEOF'

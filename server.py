@@ -16,6 +16,12 @@
   GET  /api/status?id=      單次查詢進度（SSE 不可用時的備援）
   GET  /api/chart?id=       分析結果 JSON
   GET  /api/stem?id=&kind=instrumental|vocals   分離後的音軌（m4a）
+  GET  /api/song?id=&kind=lyrics                同步歌詞（lyrics.json）
+  POST /api/lyrics/fetch    {id, title?, artist?} 自動抓（YT Music → LRCLIB → YouTube 字幕）
+  POST /api/lyrics/upload   {id, lrc, name}       使用者上傳的 .lrc
+  POST /api/lyrics/url      {id, url}             LRCLIB 查詢網址或 .lrc 網址
+  POST /api/lyrics/offset   {id, offsetMs}        整首歌詞的時間微調
+  POST /api/lyrics/delete   {id}
 """
 
 from __future__ import annotations
@@ -228,6 +234,8 @@ def run_job(job: dict) -> None:
                            instrumental=result["instrumental"],
                            vocals=result.get("vocals"),
                            **extra_meta)
+        # 歌詞在背景抓，不佔分析佇列（抓不到也不影響唱歌）
+        threading.Thread(target=auto_lyrics, args=(song_id,), daemon=True).start()
         set_progress(job_id, "完成", 1.0, state="done",
                      songId=song_id, name=name,
                      notes=meta["notes"], techniques=meta["techniques"])
@@ -237,6 +245,31 @@ def run_job(job: dict) -> None:
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
         print(f"[server] job {job_id} ({name}) 結束", flush=True)
+
+
+LYRICS_LOCK = threading.Lock()
+
+
+def auto_lyrics(song_id: str, title: str | None = None, artist: str | None = None) -> dict | None:
+    """自動抓歌詞並存檔。抓不到時不蓋掉已經有的歌詞（例如使用者上傳過的）。"""
+    import lyrics as lyrics_mod
+    meta = LIBRARY.meta(song_id)
+    if meta is None:
+        return None
+    try:
+        data = lyrics_mod.fetch_for_song(meta, title, artist)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return None
+    with LYRICS_LOCK:
+        old = LIBRARY.lyrics(song_id)
+        if not data.get("lines") and old and old.get("lines"):
+            return {**old, "log": data.get("log"), "fetchError": data.get("note")}
+        if old:
+            data["offsetMs"] = old.get("offsetMs", 0)
+        LIBRARY.save_lyrics(song_id, data)
+    print(f"[lyrics] {meta.get('name')}：{data.get('source') or '找不到'}", flush=True)
+    return data
 
 
 def worker_loop() -> None:
@@ -392,6 +425,9 @@ class Handler(SimpleHTTPRequestHandler):
             meta = LIBRARY.update_settings(str(body.get("id", "")), body)
             self._json(meta or {"error": "找不到歌曲"}, 200 if meta else 404)
             return
+        if path.startswith("/api/lyrics/"):
+            self.handle_lyrics(path)
+            return
         if path == "/api/song/delete":
             body = self._read_json_body()
             ok = LIBRARY.delete(str(body.get("id", "")))
@@ -435,6 +471,69 @@ class Handler(SimpleHTTPRequestHandler):
             }
         JOB_QUEUE.put({"jobId": job_id, "src": src, "name": name})
         self._json({"jobId": job_id, "name": name, "queued": ahead})
+
+    def handle_lyrics(self, path: str):
+        import lyrics as lyrics_mod
+        body = self._read_json_body()
+        song_id = str(body.get("id", ""))
+        meta = LIBRARY.meta(song_id)
+        if meta is None:
+            self._json({"error": "找不到歌曲"}, 404)
+            return
+
+        if path == "/api/lyrics/fetch":
+            title = str(body.get("title") or "").strip()[:200] or None
+            artist = str(body.get("artist") or "").strip()[:200] or None
+            data = auto_lyrics(song_id, title, artist)
+            self._json(data or {"error": "抓取失敗"}, 200 if data else 502)
+            return
+
+        if path in ("/api/lyrics/upload", "/api/lyrics/url"):
+            old = LIBRARY.lyrics(song_id) or {}
+            try:
+                if path == "/api/lyrics/upload":
+                    data = lyrics_mod.from_user(
+                        meta, lrc_text=str(body.get("lrc", "")), name=str(body.get("name", ""))[:200],
+                        title=old.get("title", ""), artist=old.get("artist", ""))
+                else:
+                    data = lyrics_mod.from_user(
+                        meta, url=str(body.get("url", ""))[:2000],
+                        title=old.get("title", ""), artist=old.get("artist", ""))
+            except lyrics_mod.LyricsError as exc:
+                self._json({"error": str(exc)}, 400)
+                return
+            except Exception as exc:  # noqa: BLE001
+                traceback.print_exc()
+                self._json({"error": f"處理歌詞失敗：{exc}"}, 500)
+                return
+            with LYRICS_LOCK:
+                LIBRARY.save_lyrics(song_id, data)
+            self._json(data)
+            return
+
+        if path == "/api/lyrics/offset":
+            try:
+                offset = max(-15000, min(15000, int(float(body.get("offsetMs", 0)))))
+            except (TypeError, ValueError):
+                self._json({"error": "offsetMs 不是數字"}, 400)
+                return
+            with LYRICS_LOCK:
+                data = LIBRARY.lyrics(song_id)
+                if data is None:
+                    self._json({"error": "這首歌還沒有歌詞"}, 404)
+                    return
+                data["offsetMs"] = offset
+                LIBRARY.save_lyrics(song_id, data)
+            self._json({"ok": True, "offsetMs": offset})
+            return
+
+        if path == "/api/lyrics/delete":
+            with LYRICS_LOCK:
+                LIBRARY.delete_lyrics(song_id)
+            self._json({"ok": True})
+            return
+
+        self.send_error(404)
 
     def handle_fetch(self):
         """從網址下載並分析。已經下載過的直接回傳既有那首，不重跑。"""
@@ -511,6 +610,11 @@ class Handler(SimpleHTTPRequestHandler):
             if kind == "meta":
                 meta = LIBRARY.meta(song_id)
                 self._json(meta or {"error": "找不到歌曲"}, 200 if meta else 404)
+                return
+
+            if kind == "lyrics":
+                data = LIBRARY.lyrics(song_id)
+                self._json(data or {"error": "還沒有歌詞"}, 200 if data else 404)
                 return
 
             if kind == "chart":

@@ -77,6 +77,40 @@
     鋼琴跟原唱差一個八度就是抽錯了，按下方的「✎ 編輯譜面」改掉。
   </p>
 
+  <div class="card lyrics-card">
+    <h3>歌詞 <span class="muted small" id="lyrics-status">讀取中…</span></h3>
+    <div id="chart-lyrics" class="lyrics-panel compact"></div>
+    <div class="lyrics-actions">
+      <button id="lyrics-fetch" class="ghost tiny">自動抓取</button>
+      <button id="lyrics-upload" class="ghost tiny">上傳 .lrc</button>
+      <input type="file" id="lyrics-file" accept=".lrc,.txt,text/plain" hidden>
+      <span class="lyrics-offset">
+        <button id="lyrics-earlier" class="ghost tiny" title="歌詞比歌聲晚出現時按這裡">提早 0.2 秒</button>
+        <output id="lyrics-offset-value">±0.0 秒</output>
+        <button id="lyrics-later" class="ghost tiny" title="歌詞比歌聲早出現時按這裡">延後 0.2 秒</button>
+      </span>
+    </div>
+    <details class="lyrics-more">
+      <summary>抓錯了或找不到？</summary>
+      <div class="lyrics-form">
+        <label>歌名 <input type="text" id="lyrics-title" autocomplete="off"></label>
+        <label>歌手 <input type="text" id="lyrics-artist" autocomplete="off"></label>
+        <button id="lyrics-research" class="ghost tiny">用這個歌名重新搜尋</button>
+      </div>
+      <div class="lyrics-form">
+        <label class="grow">網址 <input type="url" id="lyrics-url" autocomplete="off"
+          placeholder="LRCLIB 查詢網址或 .lrc 檔的網址"></label>
+        <button id="lyrics-url-go" class="ghost tiny">從網址抓取</button>
+      </div>
+      <p class="muted small">
+        網址可以是 LRCLIB 的查詢網址（已依歌名帶好，可以改）或任何 .lrc 檔。
+        時間整體偏移時用上面的「提早／延後」對齊，這裡的試聽會跟著原唱同步顯示。
+      </p>
+      <div class="row"><button id="lyrics-remove" class="ghost tiny danger">移除這首的歌詞</button></div>
+      <details><summary class="muted small">抓取紀錄</summary><pre id="lyrics-log" class="lyrics-log"></pre></details>
+    </details>
+  </div>
+
   <details class="advanced">
     <summary>進階</summary>
     <div class="controls">
@@ -159,6 +193,7 @@
     </div>
     <div class="sing-row controls-row">
       <button class="ghost tiny" id="guide-toggle" title="播放原唱當導唱。用喇叭時原唱會被麥克風收到，建議戴耳機">原唱 關</button>
+      <button class="ghost tiny on" id="lyrics-toggle" title="顯示／隱藏歌詞">歌詞</button>
       <div class="key-control">
         <button class="ghost tiny" id="key-down">♭</button>
         <span id="key-value">原調</span>
@@ -172,6 +207,7 @@
     <div id="countdown" class="countdown hidden"></div>
     <div id="tech-popup" class="tech-popup"><canvas width="132" height="66"></canvas></div>
   </div>
+  <div id="sing-lyrics" class="lyrics-panel"></div>
   <div class="sing-foot">
     <div id="pitch-hint" class="pitch-hint">—</div>
     <div class="row">
@@ -322,6 +358,16 @@
       <output id="silence-value">0.008</output>
     </label>
     <p class="muted small">環境吵雜時調高，避免雜音被當成歌聲。</p>
+  </div>
+  <div class="card">
+    <h3>歌詞顯示</h3>
+    <label class="slider-row"><input type="checkbox" id="lyr-opt-ruby" checked><span>日文歌顯示振假名（平假名讀音）</span></label>
+    <label class="slider-row"><input type="checkbox" id="lyr-opt-romaji"><span>日文歌顯示羅馬拼音</span></label>
+    <label class="slider-row"><input type="checkbox" id="lyr-opt-karaoke" checked><span>KTV 逐字上色</span></label>
+    <p class="muted small">
+      歌詞在加歌時自動抓（YT Music → LRCLIB → YouTube 字幕），逐字時間取自酷狗／網易雲；
+      都沒有時依參考譜的音符估算。抓錯或要調時間，到該首歌的「譜面」頁。
+    </p>
   </div>
   <div class="card">
     <h3>使用說明</h3>

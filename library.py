@@ -10,6 +10,7 @@
         chart.json         參考譜（逐幀音高 + note + 技巧標記）
         instrumental.m4a   純伴奏
         vocals.m4a         原唱人聲（導唱與譜面試聽用）
+        lyrics.json        同步歌詞（lyrics.py 產生；沒有就是還沒抓或抓不到）
 """
 
 from __future__ import annotations
@@ -53,7 +54,20 @@ class Library:
         path = folder / "chart.json"
         return path if path.exists() else None
 
+    def lyrics_path(self, song_id: str) -> Path | None:
+        folder = self.dir_of(song_id)
+        return folder / "lyrics.json" if folder else None
+
     # -- 讀取 ---------------------------------------------------------------
+
+    def lyrics(self, song_id: str) -> dict | None:
+        path = self.lyrics_path(song_id)
+        if path is None or not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
 
     def meta(self, song_id: str) -> dict | None:
         folder = self.dir_of(song_id)
@@ -133,6 +147,28 @@ class Library:
         (self.root / song_id / "meta.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         return meta
+
+    def save_lyrics(self, song_id: str, data: dict) -> dict | None:
+        """存歌詞，並在 meta 記一筆來源，讓曲庫卡片不必另外抓歌詞就知道有沒有。"""
+        meta = self.meta(song_id)
+        path = self.lyrics_path(song_id)
+        if meta is None or path is None:
+            return None
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        meta["lyrics"] = data.get("source") if data.get("lines") else None
+        (self.root / song_id / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return data
+
+    def delete_lyrics(self, song_id: str) -> None:
+        path = self.lyrics_path(song_id)
+        if path and path.exists():
+            path.unlink()
+        meta = self.meta(song_id)
+        if meta is not None:
+            meta["lyrics"] = None
+            (self.root / song_id / "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def delete(self, song_id: str) -> bool:
         folder = self.dir_of(song_id)

@@ -24,6 +24,35 @@ export const getSong = (id) => json(`api/song?id=${encodeURIComponent(id)}&kind=
 
 export const getChart = (id) => json(`api/song?id=${encodeURIComponent(id)}&kind=chart`);
 
+// ---- 歌詞 -----------------------------------------------------------------
+
+/** 這首歌的歌詞；還沒抓過回傳 null。 */
+export async function getLyrics(id) {
+  const res = await fetch(`api/song?id=${encodeURIComponent(id)}&kind=lyrics`, { cache: 'no-store' });
+  if (res.status === 404) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `伺服器回應 ${res.status}`);
+  return data;
+}
+
+const post = (url, body) => json(url, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+});
+
+/** 自動抓（YT Music → LRCLIB → YouTube 字幕）；title／artist 可指定搜尋用的歌名歌手。 */
+export const fetchLyrics = (id, title = '', artist = '') =>
+  post('api/lyrics/fetch', { id, title, artist });
+
+export const uploadLyrics = (id, lrc, name) => post('api/lyrics/upload', { id, lrc, name });
+
+export const lyricsFromUrl = (id, url) => post('api/lyrics/url', { id, url });
+
+export const setLyricsOffset = (id, offsetMs) => post('api/lyrics/offset', { id, offsetMs });
+
+export const deleteLyrics = (id) => post('api/lyrics/delete', { id });
+
 export async function saveSongSettings(id, settings) {
   return json('api/song/settings', {
     method: 'POST',

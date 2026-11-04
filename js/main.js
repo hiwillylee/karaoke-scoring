@@ -15,6 +15,7 @@ import { ChartPiano } from './piano.js';
 import { ChartEditor } from './editor.js';
 import * as api from './api.js';
 import { Tour } from './tour.js';
+import { LyricsView, describeLyrics } from './lyrics.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -55,6 +56,12 @@ const state = {
   vocalOn: true,
   lastTechCheck: 0,
   lastTechPopMs: -1,
+  // 歌詞：演唱畫面與譜面確認畫面各一個顯示器，資料是同一份 lyrics.json
+  lyrics: null,
+  lyricsView: null,
+  previewLyrics: null,
+  previewLyricsView: null,
+  lyricsPrefs: { ruby: true, romaji: false, karaoke: true, show: true },
 };
 
 // ── 基礎 ────────────────────────────────────────────────────
@@ -107,7 +114,7 @@ function songCard(song, best, matched = false) {
     ? `<span class="source">${escapeHtml(song.source)}</span>` : '';
   return `
     <div class="song-card${matched ? ' matched' : ''}" data-id="${escapeHtml(song.id)}">
-      <div class="name">${escapeHtml(song.name)}${source}</div>
+      <div class="name">${escapeHtml(song.name)}${source}${song.lyrics ? '<span class="lyr-tag" title="有歌詞">♪歌詞</span>' : ''}</div>
       <div class="meta">${fmtDuration(song.durationMs)}・${song.notes} 音</div>
       ${best ? `<div class="best">最佳 ${best.total.toFixed(1)} 分</div>` : ''}
       <div class="row">
@@ -339,6 +346,7 @@ async function openChartScreen(idOrSong) {
   // 直接畫，不要透過 requestAnimationFrame——分頁在背景時 rAF 不會觸發，
   // 一次性的繪製會整個消失
   refreshChartPreview();
+  loadChartLyrics(song);
   await preparePreviewPlayer(song);
 }
 
@@ -415,6 +423,8 @@ function refreshChartPreview() {
   state.previewChart = chart;
   // 譜變了（滑桿或段落修正），鋼琴要跟著彈新的
   state.previewPiano?.setNotes(chart.notes);
+  // 逐字時間的估算靠譜面的音，譜變了就重算
+  if (state.previewLyricsView) setPreviewLyrics(state.previewLyrics);
 
   const counts = chart.techniques.reduce((acc, t) => {
     acc[t.type] = (acc[t.type] || 0) + 1;
@@ -445,6 +455,7 @@ function drawPreviewFrame() {
   const playhead = previewPositionMs();
   drawDetailStrip($('#chart-preview'), state.previewChart, playhead);
   drawOverview($('#chart-overview'), state.previewChart, playhead);
+  state.previewLyricsView?.update(playhead);
   updatePreviewTime();
 }
 
@@ -1134,6 +1145,7 @@ async function startSinging(idOrSong) {
     noteRange(state.chart.notes, 3));
   state.renderer.setKeyShift(0);
   state.renderer.clearTrail();
+  setupSingLyrics(song);
 
   // 八度旁證：把參考譜當下的音餵給音高偵測器。只影響「判成哪個八度」，
   // 音分仍然完全來自麥克風，唱偏多少照樣扣分。
@@ -1228,6 +1240,7 @@ function loop() {
     // 讀數要在 draw() 之前算好，否則畫出來的永遠是上一幀的數字
     if (DEBUG_OCTAVE) drawOctaveDebug(songMs);
     state.renderer.draw(songMs);
+    state.lyricsView?.update(songMs);
     $('#live-score').textContent = state.scorer.liveScore;
     $('#sing-bar').style.width = `${Math.min(100, (songMs / state.chart.durationMs) * 100)}%`;
 
@@ -1608,6 +1621,174 @@ $('#silence-slider').addEventListener('input', async (e) => {
 
 $('#settings-back').addEventListener('click', () => show('library'));
 
+// ── 歌詞 ────────────────────────────────────────────────────
+//
+// 歌詞存在伺服器上（library/<id>/lyrics.json），加歌時就在背景自動抓。
+// 演唱畫面顯示 KTV 兩行歌詞；譜面確認畫面可以重抓、上傳 .lrc、貼網址、
+// 調整整首的時間位移，並在試聽時同步顯示，方便對時間。
+
+function applyLyricsPrefs() {
+  const p = state.lyricsPrefs;
+  $('#lyr-opt-ruby').checked = p.ruby;
+  $('#lyr-opt-romaji').checked = p.romaji;
+  $('#lyr-opt-karaoke').checked = p.karaoke;
+  $('#lyrics-toggle').classList.toggle('on', p.show);
+  $('#sing-lyrics').classList.toggle('hidden-lyrics', !p.show);
+  const opts = { ruby: p.ruby, romaji: p.romaji, karaoke: p.karaoke };
+  state.lyricsView?.setOptions(opts);
+  state.previewLyricsView?.setOptions(opts);
+}
+
+async function saveLyricsPrefs(patch) {
+  state.lyricsPrefs = { ...state.lyricsPrefs, ...patch };
+  applyLyricsPrefs();
+  await store.setSetting('lyricsPrefs', state.lyricsPrefs);
+}
+
+$('#lyr-opt-ruby').addEventListener('change', (e) => saveLyricsPrefs({ ruby: e.target.checked }));
+$('#lyr-opt-romaji').addEventListener('change', (e) => saveLyricsPrefs({ romaji: e.target.checked }));
+$('#lyr-opt-karaoke').addEventListener('change', (e) => saveLyricsPrefs({ karaoke: e.target.checked }));
+$('#lyrics-toggle').addEventListener('click', () => saveLyricsPrefs({ show: !state.lyricsPrefs.show }));
+
+function lyricsViewOpts() {
+  const { ruby, romaji, karaoke } = state.lyricsPrefs;
+  return { ruby, romaji, karaoke };
+}
+
+/** 演唱畫面：先顯示已有的歌詞；從來沒抓過就在背景抓一次，抓到了再補上。 */
+async function setupSingLyrics(song) {
+  if (!state.lyricsView) state.lyricsView = new LyricsView($('#sing-lyrics'), lyricsViewOpts());
+  state.lyrics = null;
+  state.lyricsView.setLyrics(null, [], '');
+  let data = null;
+  try {
+    data = await api.getLyrics(song.id);
+  } catch { /* 歌詞拿不到不影響唱歌 */ }
+  if (state.song?.id !== song.id) return;
+  if (data === null) {
+    state.lyricsView.setLyrics(null, [], '正在找歌詞…');
+    try { data = await api.fetchLyrics(song.id); } catch { data = null; }
+    if (state.song?.id !== song.id) return;
+  }
+  state.lyrics = data;
+  state.lyricsView.setLyrics(data, state.chart.notes,
+    data?.lines?.length ? '' : '這首歌沒有歌詞。可以到「譜面」頁上傳 .lrc 或貼網址');
+  state.lyricsView.update(state.player ? state.player.currentTime * 1000 : 0);
+}
+
+function setPreviewLyrics(data) {
+  state.previewLyrics = data;
+  if (!state.previewLyricsView) {
+    state.previewLyricsView = new LyricsView($('#chart-lyrics'), lyricsViewOpts());
+  }
+  state.previewLyricsView.setLyrics(data, state.previewChart?.notes || [],
+    data?.lines?.length ? '' : (data ? '找不到歌詞' : '還沒有歌詞'));
+  state.previewLyricsView.update(previewPositionMs());
+
+  $('#lyrics-status').textContent = describeLyrics(data);
+  const offset = Number(data?.offsetMs) || 0;
+  $('#lyrics-offset-value').textContent = `${offset > 0 ? '+' : offset < 0 ? '−' : '±'}${(Math.abs(offset) / 1000).toFixed(1)} 秒`;
+  const hasLines = !!data?.lines?.length;
+  $('#lyrics-earlier').disabled = !hasLines;
+  $('#lyrics-later').disabled = !hasLines;
+  $('#lyrics-remove').disabled = !hasLines;
+  $('#lyrics-log').textContent = (data?.log || []).join('\n') || '（沒有紀錄）';
+  if (data?.note) $('#lyrics-status').textContent += `｜${data.note}`;
+  if (data?.fetchError) $('#lyrics-status').textContent += `｜重抓失敗，保留原本的歌詞`;
+}
+
+async function loadChartLyrics(song) {
+  $('#lyrics-status').textContent = '讀取中…';
+  let data = null;
+  try {
+    data = await api.getLyrics(song.id);
+  } catch (err) {
+    $('#lyrics-status').textContent = `讀取失敗：${err.message}`;
+  }
+  if (state.pendingSong?.id !== song.id) return;
+  $('#lyrics-title').value = data?.title || song.name;
+  $('#lyrics-artist').value = data?.artist ?? (song.uploader || '');
+  $('#lyrics-url').value = data?.searchUrl || lrclibUrl($('#lyrics-title').value, $('#lyrics-artist').value);
+  setPreviewLyrics(data);
+}
+
+function lrclibUrl(title, artist) {
+  const q = new URLSearchParams({ track_name: title.trim() });
+  if (artist.trim()) q.set('artist_name', artist.trim());
+  return `https://lrclib.net/api/search?${q}`;
+}
+
+/** 歌詞操作共用：鎖按鈕、顯示進度、成功就換上新歌詞。 */
+async function lyricsAction(label, fn) {
+  const song = state.pendingSong;
+  if (!song) return;
+  const buttons = $$('.lyrics-card button');
+  buttons.forEach((b) => { b.disabled = true; });
+  $('#lyrics-status').textContent = label;
+  try {
+    const data = await fn(song);
+    if (state.pendingSong?.id === song.id) setPreviewLyrics(data);
+  } catch (err) {
+    $('#lyrics-status').textContent = `失敗：${err.message}`;
+  } finally {
+    buttons.forEach((b) => { b.disabled = false; });
+    if (state.pendingSong?.id === song.id && !state.previewLyrics?.lines?.length) {
+      $('#lyrics-earlier').disabled = $('#lyrics-later').disabled = $('#lyrics-remove').disabled = true;
+    }
+  }
+}
+
+$('#lyrics-fetch').addEventListener('click', () =>
+  lyricsAction('自動抓取中…（YT Music → LRCLIB → YouTube 字幕，約 5～20 秒）',
+    (song) => api.fetchLyrics(song.id)));
+
+$('#lyrics-research').addEventListener('click', () => {
+  const title = $('#lyrics-title').value.trim();
+  const artist = $('#lyrics-artist').value.trim();
+  if (!title) return;
+  $('#lyrics-url').value = lrclibUrl(title, artist);
+  lyricsAction(`以「${title}」重新搜尋中…`, (song) => api.fetchLyrics(song.id, title, artist));
+});
+
+$('#lyrics-url-go').addEventListener('click', () => {
+  const url = $('#lyrics-url').value.trim();
+  if (!url) return;
+  lyricsAction('從網址抓取中…', (song) => api.lyricsFromUrl(song.id, url));
+});
+
+$('#lyrics-upload').addEventListener('click', () => $('#lyrics-file').click());
+$('#lyrics-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  if (file.size > 512 * 1024) { alert('這個檔案太大了，不像是 .lrc 歌詞檔'); return; }
+  const text = await file.text();
+  lyricsAction(`處理「${file.name}」中…`, (song) => api.uploadLyrics(song.id, text, file.name));
+});
+
+$('#lyrics-remove').addEventListener('click', () => {
+  if (!confirm('移除這首歌的歌詞？之後可以再按「自動抓取」或上傳。')) return;
+  lyricsAction('移除中…', async (song) => { await api.deleteLyrics(song.id); return null; });
+});
+
+// 時間位移：按一下馬上反映在試聽上，存檔延後一點，連按時不必每下都送
+let offsetTimer = null;
+function nudgeLyrics(deltaMs) {
+  const data = state.previewLyrics;
+  const song = state.pendingSong;
+  if (!data?.lines?.length || !song) return;
+  data.offsetMs = Math.max(-15000, Math.min(15000, (Number(data.offsetMs) || 0) + deltaMs));
+  setPreviewLyrics(data);
+  clearTimeout(offsetTimer);
+  offsetTimer = setTimeout(() => {
+    api.setLyricsOffset(song.id, data.offsetMs).catch((err) => {
+      $('#lyrics-status').textContent = `時間位移存檔失敗：${err.message}`;
+    });
+  }, 400);
+}
+$('#lyrics-earlier').addEventListener('click', () => nudgeLyrics(-200));
+$('#lyrics-later').addEventListener('click', () => nudgeLyrics(200));
+
 // ── 手機連線（只在這台電腦上顯示） ──────────────────────────
 
 async function renderConnect() {
@@ -1907,6 +2088,8 @@ function showQuitNotice() {
   state.silenceRms = await store.getSetting('silenceRms', 0.008);
   state.guideOn = await store.getSetting('guideVocal', false);
   applyGuide(state.guideOn);
+  state.lyricsPrefs = { ...state.lyricsPrefs, ...(await store.getSetting('lyricsPrefs', {})) };
+  applyLyricsPrefs();
   $('#manual-latency').value = state.manualLatencyMs;
   $('#manual-latency-value').textContent = `${state.manualLatencyMs} ms`;
   $('#silence-slider').value = state.silenceRms;
