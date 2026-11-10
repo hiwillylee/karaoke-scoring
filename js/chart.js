@@ -63,12 +63,6 @@ export function rebuildChart(
     minLevelDb: opts.minLevelDb };
 }
 
-/** 把整份譜移調（升降調時同步移動評分基準）。 */
-export function transposeNotes(notes, semitones) {
-  if (!semitones) return notes;
-  return notes.map((n) => ({ ...n, midi: n.midi + semitones }));
-}
-
 /** 音高範圍，用來決定畫面縱軸。 */
 export function noteRange(notes, padSemitones = 3) {
   if (!notes.length) return { min: 55, max: 79 };
@@ -91,11 +85,6 @@ export function noteAt(notes, timeMs) {
     if (n.startMs > timeMs) break;
   }
   return null;
-}
-
-/** 取出時間區間內的 note，供捲動畫面繪製。 */
-export function notesInWindow(notes, startMs, endMs) {
-  return notes.filter((n) => n.endMs >= startMs && n.startMs <= endMs);
 }
 
 export const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];

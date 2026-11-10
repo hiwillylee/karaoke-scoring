@@ -70,6 +70,11 @@ export class MicTracker {
     this.lastDetect = 0;
     this.running = false;
     this.recording = null;
+    // 偵測用的暫存陣列只配置一次（以前每 10ms 配置三個新陣列，手機上會
+    // 頻繁觸發垃圾回收、造成畫面頓一下）
+    this.winBuf = null;
+    this.downBuf = new Float32Array(MIC_FRAME + 8);
+    this.level = 0;   // 最近一次的音量（設定頁的音量表用）
   }
 
   async start(deviceId = null) {
@@ -88,10 +93,13 @@ export class MicTracker {
     this.source.connect(this.node);
     this.node.port.onmessage = (e) => this.handleChunk(e.data);
     this.running = true;
+    this.onEnded = null;
 
     const track = this.stream.getAudioTracks()[0];
     this.deviceLabel = track ? track.label || '預設麥克風' : '未知麥克風';
     this.deviceId = track ? track.getSettings().deviceId : null;
+    // 拔掉耳機麥克風、藍牙斷線時軌道會結束，通知外面暫停演唱
+    if (track) track.addEventListener('ended', () => this.onEnded?.());
   }
 
   stop() {
@@ -124,7 +132,8 @@ export class MicTracker {
 
   handleChunk({ pcm, endTime }) {
     if (!this.running) return;
-    const data = new Float32Array(pcm);
+    // worklet 送來的是轉移過來的 ArrayBuffer，直接包一層視圖就好，不必複製
+    const data = pcm instanceof Float32Array ? pcm : new Float32Array(pcm);
 
     if (this.recording) this.recording.chunks.push({ pcm: data, endTime });
     if (this.onRaw) this.onRaw(data, endTime);
@@ -148,7 +157,8 @@ export class MicTracker {
     const need = Math.ceil((MIC_FRAME / MIC_SR) * srcRate);
     if (need > this.ringSize) return null;
 
-    const win = new Float32Array(need);
+    if (!this.winBuf || this.winBuf.length !== need) this.winBuf = new Float32Array(need);
+    const win = this.winBuf;
     let idx = (this.ringPos - need + this.ringSize) % this.ringSize;
     for (let i = 0; i < need; i++) {
       win[i] = this.ring[idx];
@@ -159,12 +169,13 @@ export class MicTracker {
     const t = endTime - (MIC_FRAME / MIC_SR) / 2;
 
     const level = rms(win);
+    this.level = level;
     if (level < this.silenceRms) {
       this.smoother.push(0, t * 1000);
       return { t, midi: 0, conf: 0, rms: level, raw: 0, ref: 0 };
     }
 
-    const down = resample(win, srcRate, MIC_SR);
+    const down = resample(win, srcRate, MIC_SR, this.downBuf);
     const { hz, confidence } = this.yin.detect(down.subarray(0, MIC_FRAME));
 
     // 信心不足的偵測不該進入平滑器，否則會污染近期音高的參考值

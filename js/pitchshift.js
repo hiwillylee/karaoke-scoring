@@ -36,7 +36,6 @@ export class KeyPlayer {
     if (this.node) this.node.disconnect();
 
     const tracks = Array.isArray(input) ? input : [{ buffer: input }];
-    const audioBuffer = tracks[0].buffer;
     const numChannels = tracks.reduce(
       (n, t) => Math.max(n, Math.min(2, t.buffer.numberOfChannels)), 1);
     this.node = new AudioWorkletNode(this.ctx, 'pitch-shift-processor', {

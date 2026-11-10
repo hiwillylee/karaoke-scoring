@@ -6,7 +6,7 @@
 //
 // 量測結果依「麥克風 × 輸出裝置」存成設定檔，換耳機不必重測。
 
-import { saveLatencyProfile } from './storage.js';
+import { saveLatencyProfile } from './api.js';
 
 const ENV_HOP_MS = 5;
 const ENV_WIN_MS = 12;
@@ -172,10 +172,31 @@ export function isReliable(result) {
   return result.accepted >= 6 && result.spreadMs <= 160;
 }
 
-export async function persist(result, micLabel, outputLabel) {
-  return saveLatencyProfile(micLabel, outputLabel, result.offsetMs, {
+/**
+ * 存成設定檔（存在伺服器上，換網址進來也還在）。
+ *
+ * 量到的是「輸出延遲 + 輸入延遲」的總和。另外記下校準當下瀏覽器回報的
+ * 輸出延遲，扣掉後就是跟輸出裝置無關的那一段（inputMs）。之後戴耳機、
+ * 換藍牙喇叭唱時，用當下回報的輸出延遲加回去，不必每換一次輸出就重測。
+ */
+export async function persist(result, micLabel, outputLabel, outputLatencyMs = 0) {
+  return saveLatencyProfile({
+    micLabel,
+    outputLabel,
+    offsetMs: result.offsetMs,
+    outputLatencyMs: Math.round(outputLatencyMs),
+    inputMs: Math.round(result.offsetMs - outputLatencyMs),
     accepted: result.accepted,
     total: result.total,
     spreadMs: result.spreadMs,
   });
+}
+
+/** 依設定檔與當下的輸出延遲算出要補償多少毫秒。沒有設定檔就用瀏覽器的估計值。 */
+export function latencyFor(profile, currentOutputMs) {
+  if (!profile) return Math.round(currentOutputMs);
+  if (typeof profile.inputMs === 'number' && typeof profile.outputLatencyMs === 'number') {
+    return Math.round(profile.inputMs + currentOutputMs);
+  }
+  return profile.offsetMs;
 }

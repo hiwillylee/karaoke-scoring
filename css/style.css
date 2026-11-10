@@ -1,12 +1,13 @@
 /*
- * 介面：參考日式卡拉OK點歌機的風格，分淺色／深色兩套，預設跟隨系統
- * （設定頁可以固定其中一種，寫在 <html data-theme>）。
+ * 介面：參考日式卡拉OK點歌機的風格，分淺色／深色兩套，預設跟隨系統。
+ * 不論「跟隨系統」或手動選擇，最後都由 js/theme.js（與 index.html 開頭的
+ * 小段腳本）解析成 <html data-theme="light|dark">，所以深色變數只需要寫一份。
  *
  * - 選單類畫面是點歌平板那種卡片介面，主色是緋紅。
  * - 演唱與結算畫面：歌詞粗圓體描邊、上下兩行交錯，唱到的字由左往右染色，
  *   背景是模糊放大的歌曲封面。
- * - 譜面預覽、編輯捲軸這類畫布區塊兩種主題都維持深藍「螢幕」，畫布配色不必換。
- * - 演唱畫面的音程條與結算圖表畫在畫布上，顏色讀這裡的 --cv-* 變數（js/theme.js）。
+ * - 所有畫布（譜面預覽、編輯捲軸、演唱音程條、結算圖表）兩種主題都是深藍
+ *   「螢幕」，同一套視覺語言；畫布配色讀這裡的 --cv-* 變數（js/theme.js）。
  *
  * 全部手寫、不引用外部字型或資源（內網與離線都要能用）。
  */
@@ -37,7 +38,7 @@
   --surface-2: #f6f7fa;
   --text: #1b2232;
   --muted: #697184;
-  --faint: #9aa1b1;
+  --faint: #737a8a;   /* 白底上約 4.4:1，12px 的提示文字也讀得清楚 */
   --line: #e3e6ec;
   --shadow: 0 1px 2px rgba(18, 28, 56, .05), 0 6px 18px rgba(18, 28, 56, .06);
   --shadow-lift: 0 2px 4px rgba(18, 28, 56, .07), 0 14px 32px rgba(18, 28, 56, .12);
@@ -47,6 +48,7 @@
   /* 演唱／結算畫面 */
   --stage-page: linear-gradient(180deg, #eef1f8, #e3e8f2);
   --stage-panel: rgba(255, 255, 255, .78);
+  --stage-panel-solid: rgba(255, 255, 255, .9);
   --stage-line: rgba(27, 34, 50, .1);
   --backdrop-filter: blur(40px) saturate(1.25) brightness(1.15);
   --backdrop-tint: linear-gradient(180deg, rgba(243, 244, 247, .6), rgba(243, 244, 247, .9));
@@ -56,22 +58,24 @@
   --lyr-glow: rgba(20, 30, 60, .18);
   --chip-dark: rgba(27, 34, 50, .07);
 
-  /* 畫布（js/theme.js 讀取） */
-  --cv-note-fill: rgba(30, 48, 90, .13);
-  --cv-note-stroke: rgba(30, 48, 90, .55);
-  --cv-note-fill-past: rgba(30, 48, 90, .06);
-  --cv-note-stroke-past: rgba(30, 48, 90, .2);
-  --cv-key: rgba(30, 60, 120, .045);
-  --cv-octave: rgba(30, 60, 120, .16);
-  --cv-label: rgba(30, 48, 90, .55);
-  --cv-judge: rgba(27, 34, 50, .45);
-  --cv-hit: #f0a300;
-  --cv-miss: #e0457b;
-  --cv-cursor-edge: #ffffff;
-  --cv-grid: rgba(30, 48, 90, .1);
-  --cv-text: rgba(27, 34, 50, .7);
-  --cv-ref: #1f9fd0;
-  --cv-user: #d63aa8;
+  /* 畫布（js/theme.js 讀取）：畫布一律是深藍螢幕，兩種主題用同一組顏色 */
+  --cv-note-fill: rgba(255, 255, 255, .26);
+  --cv-note-stroke: rgba(255, 255, 255, .9);
+  --cv-note-fill-past: rgba(255, 255, 255, .1);
+  --cv-note-stroke-past: rgba(255, 255, 255, .28);
+  --cv-key: rgba(160, 190, 255, .045);
+  --cv-octave: rgba(160, 190, 255, .22);
+  --cv-label: rgba(190, 210, 255, .65);
+  --cv-judge: rgba(255, 255, 255, .75);
+  --cv-hit: #ffd23f;
+  --cv-miss: #ff4f8b;
+  --cv-cursor-edge: rgba(255, 255, 255, .9);
+  --cv-grid: rgba(255, 255, 255, .12);
+  --cv-text: rgba(255, 255, 255, .78);
+  --cv-ref: #00e5ff;
+  --cv-user: #ff2bd6;
+  --badge-bg: rgba(10, 18, 46, .78);
+  --badge-text: #ffd34d;
 
   /* 譜面預覽、編輯捲軸、譜面頁歌詞試聽：兩種主題都是深藍螢幕 */
   --screen-1: #10296b;
@@ -89,63 +93,7 @@
                 "Meiryo", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
 }
 
-/* ── 深色：系統是深色且沒有固定淺色，或手動選了深色 ── */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --brand: #f2475d;
-    --brand-hover: #ff6276;
-    --brand-soft: rgba(242, 71, 93, .14);
-    --brand-ring: rgba(242, 71, 93, .3);
-    --accent: #5ea0ff;
-    --accent-soft: rgba(94, 160, 255, .13);
-    --accent-line: rgba(94, 160, 255, .35);
-    --gold: #ffc83d;
-    --ok: #4ccf86;
-    --danger: #ff6b7c;
-    --danger-soft: rgba(255, 107, 124, .1);
-    --danger-line: rgba(255, 107, 124, .35);
-    --warn-bg: rgba(255, 200, 61, .09);
-    --warn-line: rgba(255, 200, 61, .3);
-    --warn-text: #ffd77a;
-    --bg: #0e131d;
-    --surface: #161c28;
-    --surface-2: #1c2331;
-    --text: #e9edf5;
-    --muted: #9ba4b6;
-    --faint: #687286;
-    --line: #283041;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .25);
-    --shadow-lift: 0 2px 4px rgba(0, 0, 0, .35), 0 14px 32px rgba(0, 0, 0, .4);
-    --overlay: rgba(0, 0, 0, .6);
-    --topbar: rgba(14, 19, 29, .86);
-    --stage-page: radial-gradient(1200px 700px at 50% -10%, #1a46b8 0%, transparent 60%), linear-gradient(180deg, #0d2a78, #06143f);
-    --stage-panel: rgba(255, 255, 255, .05);
-    --stage-line: rgba(255, 255, 255, .14);
-    --backdrop-filter: blur(40px) saturate(1.3) brightness(.55);
-    --backdrop-tint: linear-gradient(180deg, rgba(6, 20, 63, .55), rgba(6, 20, 63, .85));
-    --lyr-unsung: #ffffff;
-    --lyr-edge: #061a52;
-    --lyr-sung: #4aa8ff;
-    --lyr-glow: rgba(0, 0, 0, .45);
-    --chip-dark: rgba(0, 0, 0, .28);
-    --cv-note-fill: rgba(255, 255, 255, .26);
-    --cv-note-stroke: rgba(255, 255, 255, .9);
-    --cv-note-fill-past: rgba(255, 255, 255, .1);
-    --cv-note-stroke-past: rgba(255, 255, 255, .28);
-    --cv-key: rgba(160, 190, 255, .045);
-    --cv-octave: rgba(160, 190, 255, .22);
-    --cv-label: rgba(190, 210, 255, .6);
-    --cv-judge: rgba(255, 255, 255, .75);
-    --cv-hit: #ffd23f;
-    --cv-miss: #ff4f8b;
-    --cv-cursor-edge: rgba(255, 255, 255, .9);
-    --cv-grid: rgba(255, 255, 255, .1);
-    --cv-text: rgba(255, 255, 255, .72);
-    --cv-ref: #00e5ff;
-    --cv-user: #ff2bd6;
-  }
-}
+/* ── 深色 ── */
 :root[data-theme="dark"] {
   color-scheme: dark;
   --brand: #f2475d;
@@ -168,7 +116,7 @@
   --surface-2: #1c2331;
   --text: #e9edf5;
   --muted: #9ba4b6;
-  --faint: #687286;
+  --faint: #8a93a6;
   --line: #283041;
   --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .25);
   --shadow-lift: 0 2px 4px rgba(0, 0, 0, .35), 0 14px 32px rgba(0, 0, 0, .4);
@@ -176,6 +124,7 @@
   --topbar: rgba(14, 19, 29, .86);
   --stage-page: radial-gradient(1200px 700px at 50% -10%, #1a46b8 0%, transparent 60%), linear-gradient(180deg, #0d2a78, #06143f);
   --stage-panel: rgba(255, 255, 255, .05);
+  --stage-panel-solid: rgba(14, 26, 70, .72);
   --stage-line: rgba(255, 255, 255, .14);
   --backdrop-filter: blur(40px) saturate(1.3) brightness(.55);
   --backdrop-tint: linear-gradient(180deg, rgba(6, 20, 63, .55), rgba(6, 20, 63, .85));
@@ -184,27 +133,12 @@
   --lyr-sung: #4aa8ff;
   --lyr-glow: rgba(0, 0, 0, .45);
   --chip-dark: rgba(0, 0, 0, .28);
-  --cv-note-fill: rgba(255, 255, 255, .26);
-  --cv-note-stroke: rgba(255, 255, 255, .9);
-  --cv-note-fill-past: rgba(255, 255, 255, .1);
-  --cv-note-stroke-past: rgba(255, 255, 255, .28);
-  --cv-key: rgba(160, 190, 255, .045);
-  --cv-octave: rgba(160, 190, 255, .22);
-  --cv-label: rgba(190, 210, 255, .6);
-  --cv-judge: rgba(255, 255, 255, .75);
-  --cv-hit: #ffd23f;
-  --cv-miss: #ff4f8b;
-  --cv-cursor-edge: rgba(255, 255, 255, .9);
-  --cv-grid: rgba(255, 255, 255, .1);
-  --cv-text: rgba(255, 255, 255, .72);
-  --cv-ref: #00e5ff;
-  --cv-user: #ff2bd6;
 }
 
 * { box-sizing: border-box; }
 
 body {
-  margin: 0; min-height: 100vh;
+  margin: 0; min-height: 100vh; min-height: 100dvh;
   background: var(--bg); color: var(--text);
   font-family: var(--font);
   -webkit-font-smoothing: antialiased;
@@ -222,32 +156,29 @@ body[data-screen="sing"], body[data-screen="result"] {
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: .05em; }
-.brand .jp { font-family: var(--font-round); font-size: 20px; color: var(--text); display: flex; align-items: center; gap: 8px; }
-.brand .jp::before {
-  content: "♪"; display: inline-flex; align-items: center; justify-content: center;
-  width: 30px; height: 30px; border-radius: 9px; font-size: 17px;
-  background: var(--brand); color: var(--on-brand);
+.brand .logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 9px; background: var(--brand); color: var(--on-brand);
 }
-.brand .zh {
-  font-size: 12px; font-weight: 800; padding: 2px 8px; border-radius: 6px;
-  background: var(--brand-soft); color: var(--brand); letter-spacing: .12em;
-}
+.brand .logo .ic { width: 18px; height: 18px; }
+.brand .name { font-family: var(--font-round); font-size: 19px; color: var(--text); }
 .topbar nav { display: flex; gap: 4px; }
 .topbar nav button {
   background: transparent; color: var(--muted); border: 1px solid transparent; font-weight: 700; padding: 7px 14px;
+  display: inline-flex; align-items: center; gap: 6px;
 }
 .topbar nav button:hover { color: var(--text); background: var(--surface-2); }
 .topbar nav button.active { color: var(--brand); background: var(--brand-soft); }
-.topbar nav button.danger { color: var(--danger); border-color: var(--danger-line); }
-.topbar nav button.danger:hover { background: var(--danger-soft); }
 
 /* 手機底部導覽列：桌面隱藏，靠 @media 開啟。與頂列共用同一批 data-goto 按鈕。 */
 .bottom-nav { display: none; }
 .bottom-nav button {
   flex: 1; background: transparent; border: none; border-radius: 0;
-  padding: 12px 4px 10px; color: var(--muted); font-size: 13px; font-weight: 700;
+  padding: 8px 4px 8px; color: var(--muted); font-size: 12px; font-weight: 700;
   letter-spacing: .04em; position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
 }
+.bottom-nav button .ic { width: 22px; height: 22px; }
 .bottom-nav button.active { color: var(--brand); }
 .bottom-nav button.active::before {
   content: ""; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
@@ -268,22 +199,38 @@ h3 { font-size: 15px; margin: 0 0 12px; letter-spacing: .04em; font-weight: 800;
 h3.mt { margin-top: 22px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
-.hint { color: var(--faint); font-size: 12px; }
+.hint { color: var(--faint); font-size: 12px; line-height: 1.6; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* 圖示（index.html 的 SVG sprite）：跟著文字顏色與大小 */
+.ic {
+  width: 1.15em; height: 1.15em; flex-shrink: 0; vertical-align: -.2em;
+  fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+.ic.big { width: 44px; height: 44px; stroke-width: 1.5; color: var(--faint); }
+
+/* 鍵盤操作時看得到焦點在哪（滑鼠點擊不顯示） */
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+button:focus:not(:focus-visible), a:focus:not(:focus-visible) { outline: none; }
 code {
   font: 12px ui-monospace, Menlo, monospace; background: var(--surface-2);
   border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
 }
 
 /* ── 按鈕 ── */
-button {
+button, a.button {
   font: inherit; cursor: pointer; border-radius: 999px; padding: 9px 18px; color: var(--text);
   border: 1px solid var(--line); background: var(--surface);
   transition: background .15s, color .15s, border-color .15s, box-shadow .15s, transform .08s;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
 }
+a.button { text-decoration: none; }
+button.icon-only { padding: 6px; width: 34px; height: 34px; }
+button.tiny.icon-only { width: 30px; height: 30px; padding: 4px; }
 button:active:not(:disabled) { transform: translateY(1px); }
-button.ghost { background: var(--surface); color: var(--text); }
-button.ghost:hover { border-color: var(--brand); color: var(--brand); }
-button.tiny { padding: 4px 12px; font-size: 13px; }
+button.ghost, a.button.ghost { background: var(--surface); color: var(--text); }
+button.ghost:hover, a.button.ghost:hover { border-color: var(--brand); color: var(--brand); }
+button.tiny, a.button.tiny { padding: 4px 12px; font-size: 13px; }
 button.primary {
   background: var(--brand); color: var(--on-brand); font-weight: 800; border: none; letter-spacing: .04em;
   box-shadow: 0 4px 14px var(--brand-ring);
@@ -292,6 +239,8 @@ button.primary:hover { background: var(--brand-hover); }
 button:disabled { opacity: .42; cursor: not-allowed; box-shadow: none; }
 button.danger, button.ghost.danger, button.tiny.danger { color: var(--danger); border-color: var(--danger-line); background: var(--surface); }
 button.ghost.danger:hover, button.danger:hover { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+button.danger-primary { background: var(--danger); color: #fff; border: none; font-weight: 800; }
+button.danger-primary:hover { filter: brightness(1.08); }
 /* 開關型按鈕（原唱、鋼琴、歌詞）：開啟時主色 */
 button.tiny.on, button.ghost.on { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 
@@ -312,21 +261,22 @@ button.tiny.on, button.ghost.on { background: var(--brand); border-color: var(--
   border-radius: 999px; padding: 0 18px; height: 52px; transition: .15s; box-shadow: var(--shadow);
 }
 .search-field:focus-within { border-color: var(--brand); box-shadow: 0 0 0 4px var(--brand-soft); }
-.search-icon { color: var(--brand); font-size: 20px; flex-shrink: 0; font-weight: 700; }
+.search-icon { color: var(--brand); width: 20px; height: 20px; }
 .search-field input {
   flex: 1; min-width: 0; background: none; border: none; outline: none;
   color: var(--text); font: inherit; font-size: 15px;
 }
 .search-field input::placeholder { color: var(--faint); }
 .search-field input::-webkit-search-cancel-button { display: none; }
-.search-clear { border: none; background: none; color: var(--faint); padding: 4px 6px; font-size: 13px; line-height: 1; flex-shrink: 0; }
+.search-clear { border: none; background: none; color: var(--faint); padding: 6px; line-height: 1; flex-shrink: 0; }
 .search-clear:hover { color: var(--text); }
 .upload-btn {
-  flex-shrink: 0; width: 52px; height: 52px; padding: 0; font-size: 26px; font-weight: 400; line-height: 1;
+  flex-shrink: 0; width: 52px; height: 52px; padding: 0;
   background: var(--brand); color: var(--on-brand); border: none; border-radius: 50%;
   box-shadow: 0 4px 14px var(--brand-ring);
 }
 .upload-btn:hover { background: var(--brand-hover); }
+.upload-btn .ic { width: 26px; height: 26px; stroke-width: 2.4; }
 
 .search-status {
   margin-top: 14px; padding: 12px 16px; border-radius: 12px;
@@ -347,10 +297,18 @@ button.tiny.on, button.ghost.on { background: var(--brand); border-color: var(--
 .link { color: var(--accent); cursor: pointer; text-decoration: underline; }
 
 /* ── 曲庫：封面卡片 ── */
-.library-head { display: flex; align-items: baseline; justify-content: space-between; margin: 26px 2px 0; }
+.library-head { display: flex; align-items: center; gap: 10px; margin: 26px 2px 0; }
+.library-head .sort-select { margin-left: auto; }
+.library-head select { min-width: 0; padding: 6px 10px; font-size: 13px; }
 .library-head h2 { margin: 0; font-size: 18px; display: flex; align-items: center; gap: 8px; }
 .library-head h2::before { content: ""; width: 5px; height: 18px; border-radius: 3px; background: var(--brand); }
-.artist-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+/* 歌手一多也只佔一排，左右滑動，不會把曲庫一直往下推 */
+.artist-bar {
+  display: flex; gap: 8px; margin-top: 10px; overflow-x: auto; padding: 2px 2px 8px;
+  scrollbar-width: thin; -webkit-mask-image: linear-gradient(90deg, #000 92%, transparent);
+  mask-image: linear-gradient(90deg, #000 92%, transparent);
+}
+.artist-bar .chip { flex-shrink: 0; white-space: nowrap; }
 .artist-bar .chip { padding: 5px 12px; font-size: 13px; font-weight: 700; box-shadow: var(--shadow); }
 .artist-bar .chip small { margin-left: 6px; color: var(--faint); font-weight: 700; }
 .artist-bar .chip:hover { border-color: var(--brand); color: var(--brand); }
@@ -374,19 +332,32 @@ button.tiny.on, button.ghost.on { background: var(--brand); border-color: var(--
   background: rgba(8, 16, 40, 0); font-size: 0; transition: .18s;
 }
 .song-card .cover:hover .play { background: rgba(8, 16, 40, .35); }
-.song-card .cover .play::before {
-  content: "▶"; display: flex; align-items: center; justify-content: center;
-  width: 0; height: 0; border-radius: 50%; background: var(--brand); color: var(--on-brand);
-  font-size: 18px; padding-left: 3px; transition: .18s; overflow: hidden;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, .3);
+.song-card .cover .play .ic {
+  width: 0; height: 0; padding: 0; border-radius: 50%; background: var(--brand); color: var(--on-brand);
+  transition: .18s; box-shadow: 0 6px 18px rgba(0, 0, 0, .3); stroke: none;
 }
-.song-card .cover:hover .play::before { width: 54px; height: 54px; }
+.song-card .cover:hover .play .ic { width: 54px; height: 54px; padding: 15px 13px 15px 17px; }
+/* 觸控螢幕沒有 hover：播放鈕縮小常駐在角落，看得出封面可以點 */
+@media (hover: none) {
+  .song-card .cover .play { align-items: flex-end; justify-content: flex-start; padding: 8px; }
+  .song-card .cover .play .ic { width: 34px; height: 34px; padding: 9px 8px 9px 10px; }
+  .song-card:hover { transform: none; }
+}
 .best-badge {
   position: absolute; right: 8px; top: 8px; padding: 3px 9px; border-radius: 999px;
-  background: rgba(10, 18, 46, .78); color: #ffd34d; font-size: 12px; font-weight: 800;
-  font-variant-numeric: tabular-nums; backdrop-filter: blur(4px);
+  background: var(--badge-bg); color: var(--badge-text); font-size: 12px; font-weight: 800;
+  font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: 3px;
 }
-.best-badge::before { content: "★ "; }
+.best-badge .ic { width: 12px; height: 12px; fill: currentColor; stroke: none; }
+.song-card { position: relative; }
+.fav-btn {
+  position: absolute; left: 8px; top: 8px; width: 32px; height: 32px; padding: 0; border: none;
+  background: var(--badge-bg); color: rgba(255, 255, 255, .85);
+}
+.fav-btn .ic { width: 17px; height: 17px; }
+.fav-btn.on { color: var(--badge-text); }
+.fav-btn.on .ic { fill: currentColor; }
+.fav-btn:hover { color: var(--badge-text); }
 .song-card .info { padding: 12px 14px 4px; flex: 1; min-width: 0; }
 .song-card .name {
   font-weight: 800; font-size: 15px; line-height: 1.35; word-break: break-word;
@@ -407,9 +378,34 @@ button.tiny.on, button.ghost.on { background: var(--brand); border-color: var(--
 .song-card .meta { color: var(--faint); font-size: 12px; margin-top: 6px; font-variant-numeric: tabular-nums; }
 .song-card .row { margin: 0; padding: 10px 14px 14px; gap: 6px; flex-wrap: nowrap; }
 .song-card .row button.primary { flex: 1; box-shadow: none; }
-.song-card .row .icon { padding: 4px 10px; }
+/* 刪除鈕跟「譜面」隔開、平常是淡色，避免順手點到 */
+.song-card .row .card-del { margin-left: auto; flex-shrink: 0; color: var(--faint); border-color: transparent; background: none; }
+.song-card .row .card-del:hover { color: var(--danger); border-color: var(--danger-line); background: var(--danger-soft); }
 .song-card.matched { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(255, 179, 0, .35), var(--shadow-lift); }
 .song-card.matched .name::before { content: "✓ "; color: var(--gold); }
+
+.empty-state {
+  grid-column: 1 / -1; text-align: center; padding: 36px 20px; border: 2px dashed var(--line);
+  border-radius: var(--radius); background: var(--surface); color: var(--muted);
+}
+.empty-state h3 { justify-content: center; margin: 12px 0 6px; font-size: 17px; color: var(--text); }
+.empty-state p { margin: 8px auto; max-width: 460px; line-height: 1.7; }
+.empty-state button { margin-top: 10px; }
+
+/* 背景處理中的歌（下載、分離、抽音高） */
+.job-list { display: grid; gap: 10px; margin-top: 14px; }
+.job-list:empty { display: none; }
+.job-card {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px;
+  background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow);
+}
+.job-card.failed { border-color: var(--danger-line); background: var(--danger-soft); }
+.job-main { flex: 1; min-width: 0; }
+.job-name { font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-msg { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.job-card.failed .job-msg { color: var(--danger); }
+.job-msg strong { color: var(--text); }
+.job-card .progress { margin: 8px 0 0; max-width: none; height: 6px; }
 
 /* 沒有封面時依歌名配色的預設封面 */
 .cover-ph {
@@ -427,12 +423,6 @@ button.tiny.on, button.ghost.on { background: var(--brand); border-color: var(--
 .progress { width: 100%; max-width: 520px; height: 10px; border-radius: 999px; background: var(--line); overflow: hidden; margin: 14px 0; }
 .progress.thin { height: 5px; margin: 8px 0 0; max-width: none; background: var(--stage-line); }
 .progress-bar { height: 100%; width: 0; border-radius: 999px; background: var(--brand); transition: width .25s; }
-.stages { list-style: none; padding: 0; margin: 18px 0; color: var(--faint); font-size: 14px; }
-.stages li { padding: 5px 0; }
-.stages li.done { color: var(--ok); }
-.stages li.done::before { content: "✓ "; }
-.stages li.active { color: var(--text); font-weight: 700; }
-.stages li.active::before { content: "▸ "; color: var(--brand); }
 
 /* ── 譜面確認 ── */
 .chart-head { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
@@ -449,7 +439,8 @@ button.tiny.on, button.ghost.on { background: var(--brand); border-color: var(--
   content: "更換"; position: absolute; inset: auto 0 0 0; padding: 3px 0; font-size: 11px; font-weight: 700;
   background: rgba(8, 16, 40, .6); color: #fff; opacity: 0; transition: .15s;
 }
-.cover-thumb:hover::after { opacity: 1; }
+.cover-thumb:hover::after, .cover-thumb:focus-visible::after { opacity: 1; }
+@media (hover: none) { .cover-thumb::after { opacity: 1; } }
 .cover-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
 
 /* 畫布區塊一律是深藍的「螢幕」，畫布裡的配色才不必跟著主題換 */
@@ -486,12 +477,6 @@ kbd {
   font: 11px ui-monospace, Menlo, monospace; background: var(--surface); border: 1px solid var(--line);
   border-bottom-width: 2px; border-radius: 5px; padding: 1px 5px; margin: 0 1px;
 }
-.fix-list { list-style: none; margin: 12px 0 0; padding: 0; }
-.fix-list li {
-  display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted);
-  font-variant-numeric: tabular-nums; padding: 5px 0; border-bottom: 1px solid var(--line);
-}
-.fix-list:empty { display: none; }
 input[type=range] { accent-color: var(--brand); width: 150px; }
 input[type=checkbox] { accent-color: var(--brand); width: 16px; height: 16px; }
 output { font-variant-numeric: tabular-nums; color: var(--text); min-width: 42px; font-weight: 700; }
@@ -502,12 +487,17 @@ select {
 
 /* ══ 演唱與結算 ═══════════════════════════════════════════════ */
 .stage-screen { position: relative; }
-.stage-screen .card { background: var(--stage-panel); border-color: var(--stage-line); backdrop-filter: blur(8px); }
+/* 不用 backdrop-filter：它底下的封面背景每一幀都要重新模糊，手機上很吃力 */
+.stage-screen .card { background: var(--stage-panel-solid); border-color: var(--stage-line); }
 
 /* 封面當背景：放大、模糊，像卡拉OK的背景影片 */
 .backdrop { position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; opacity: 0; transition: opacity .6s; }
 .backdrop.show { opacity: 1; }
-.backdrop img { position: absolute; inset: -8%; width: 116%; height: 116%; object-fit: cover; filter: var(--backdrop-filter); }
+/* 獨立成一層（will-change），模糊只算一次，上面的畫布重畫時不必再算 */
+.backdrop img {
+  position: absolute; inset: -8%; width: 116%; height: 116%; object-fit: cover;
+  filter: var(--backdrop-filter); will-change: transform; transform: translateZ(0);
+}
 .backdrop::after { content: ""; position: absolute; inset: 0; background: var(--backdrop-tint); }
 
 /* ── 演唱畫面 ── */
@@ -546,8 +536,9 @@ select {
 
 .stage-wrap { position: relative; margin-top: 12px; }
 #stage {
-  width: 100%; height: min(46vh, 400px); display: block; border-radius: var(--radius);
-  background: var(--stage-panel); border: 1px solid var(--stage-line); backdrop-filter: blur(6px);
+  width: 100%; height: min(46vh, 400px); height: min(46dvh, 400px); display: block; border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--screen-1), var(--screen-2)); border: 1px solid var(--screen-2);
+  box-shadow: var(--shadow);
 }
 .countdown {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -563,12 +554,26 @@ select {
   100% { opacity: 0; transform: translate(-50%, -20px) scale(1); }
 }
 
+.sing-exit { flex-shrink: 0; }
+.sing-row.title-row .sing-meta { flex: 1; }
+.sing-row.controls-row button { white-space: nowrap; }
+.volume-panel {
+  display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; padding: 10px 14px; border-radius: 12px;
+  background: var(--stage-panel-solid); border: 1px solid var(--stage-line);
+}
+.volume-panel.hidden { display: none; }
+.skip-btn {
+  position: absolute; right: 14px; bottom: 14px; background: rgba(255, 255, 255, .92); color: #10296b;
+  border: none; font-weight: 800; box-shadow: 0 6px 18px rgba(0, 0, 0, .3);
+}
+.skip-btn.hidden { display: none; }
 .sing-foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
 .sing-foot .row { margin-top: 0; }
 .pitch-hint {
   font-size: 16px; font-weight: 900; letter-spacing: .14em; min-width: 120px; text-align: center;
   padding: 6px 14px; border-radius: 999px; background: var(--chip-dark); color: var(--faint);
 }
+.pitch-hint.idle { font-size: 13px; letter-spacing: .08em; font-weight: 700; }
 .pitch-hint.good { color: #3a2600; background: var(--gold-strong); box-shadow: 0 0 20px rgba(255, 200, 61, .45); }
 .pitch-hint.high { color: #fff; background: var(--brand); }
 .pitch-hint.low { color: #fff; background: var(--accent); }
@@ -602,6 +607,7 @@ select {
 .lyr-line ruby, .lyr-slot ruby { ruby-position: over; }
 .lyr-line rt, .lyr-slot rt { font-size: .42em; letter-spacing: .02em; font-weight: 700; }
 /* 描邊：用多層 drop-shadow，才能跟逐字上色（background-clip:text）並存 */
+.lyr-line, .lyr-slot { contain: layout paint; }
 .lyr-line.big .lyr-text, .lyr-slot .lyr-text {
   font-family: var(--font-round); font-weight: 800; letter-spacing: .04em; color: var(--unsung);
   filter: drop-shadow(0 0 1px var(--edge)) drop-shadow(0 0 1px var(--edge)) drop-shadow(0 0 1px var(--edge))
@@ -610,13 +616,21 @@ select {
 .lyr-line.big .lyr-text { font-size: clamp(22px, 3.2vw, 36px); opacity: .7; transition: opacity .2s; }
 .lyr-line.big.active .lyr-text { opacity: 1; }
 .lyr-line.big.interlude .lyr-text, .lyr-slot.interlude .lyr-text { opacity: .55; }
+/* 逐字上色那一句疊兩層（見 lyrics.js 的 build）：底層 .lyr-under 是靜態的
+   描邊字，自成一層（will-change）讓濾鏡結果被快取；上層 .lyr-top 不套濾鏡，
+   只把唱過的部分塗上顏色，沒唱到的部分透明、露出底層。 */
+.lyr-stack { display: grid; }
+.lyr-stack > .lyr-text { grid-area: 1 / 1; }
+.lyr-under { will-change: transform; }
+.lyr-line.big .lyr-top, .lyr-slot .lyr-top { filter: none; }
+.lyr-top rt { color: transparent; }
 .wipe .ch {
   --p: 0%;
-  background-image: linear-gradient(90deg, var(--sung) 0 var(--p), var(--unsung) var(--p) 100%);
+  background-image: linear-gradient(90deg, var(--sung) 0 var(--p), transparent var(--p) 100%);
   -webkit-background-clip: text; background-clip: text;
   color: transparent; -webkit-text-fill-color: transparent;
 }
-.wipe ruby.sung rt { color: var(--sung); }
+.wipe .lyr-top ruby.sung rt { color: var(--sung); }
 .lyr-line.next .lyr-text { font-size: clamp(15px, 2vw, 21px); opacity: .6; font-weight: 700; }
 .lyr-romaji { font-size: 13px; opacity: .72; letter-spacing: .04em; margin-top: 2px; }
 .lyr-line.big .lyr-romaji { font-size: 15px; }
@@ -668,16 +682,35 @@ select {
 }
 .big-score {
   font-family: var(--font-round); font-size: 96px; font-weight: 900; font-variant-numeric: tabular-nums; line-height: 1.05;
-  margin-top: 6px;
+  margin-top: 6px; display: inline-flex; align-items: baseline;
+}
+/* 漸層與陰影只套在數字上；「分」字獨立，不會被糊掉 */
+.big-score .num {
   background: linear-gradient(180deg, #ffe27a, #ffbf1f 50%, #f08c00);
   -webkit-background-clip: text; background-clip: text; color: transparent;
   filter: drop-shadow(0 3px 0 rgba(122, 61, 0, .55)) drop-shadow(0 0 24px rgba(255, 179, 0, .35));
 }
-.big-score small { font-size: 20px; -webkit-text-fill-color: var(--gold); margin-left: 6px; }
+.big-score small { font-size: 22px; font-weight: 800; color: var(--gold); margin-left: 6px; }
+.result-flag {
+  display: inline-block; margin-top: 10px; padding: 5px 14px; border-radius: 999px; font-size: 13px;
+  background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-text);
+}
+.history-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.history-list li {
+  display: flex; justify-content: space-between; padding: 5px 0; font-size: 13px; color: var(--muted);
+  border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums;
+}
+.history-list li b { color: var(--text); }
 .comment { color: var(--muted); margin-top: 6px; }
-.result-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; }
-.radar { width: 100%; height: 280px; display: block; }
-.compare { width: 100%; height: 200px; display: block; }
+.result-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; align-items: start; }
+.radar, .compare {
+  display: block; border-radius: 12px; background: linear-gradient(180deg, var(--screen-1), var(--screen-2));
+}
+.radar { width: 100%; height: 280px; }
+.compare { height: 240px; }
+.compare-wrap { overflow-x: auto; overscroll-behavior-x: contain; border-radius: 12px; cursor: grab; }
+.compare-wrap.dragging { cursor: grabbing; user-select: none; }
+.compare-zoom { margin-bottom: 10px; }
 .legend { margin-left: auto; font-size: 11px; color: var(--muted); letter-spacing: 0; font-weight: 600; }
 .legend i { display: inline-block; width: 14px; height: 3px; margin: 0 5px 0 12px; vertical-align: middle; }
 .legend i.ref { background: var(--cyan); }
@@ -707,10 +740,11 @@ select {
   max-width: 260px; align-self: center; width: 100%;
 }
 .qr-box svg { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
-.qr-empty { color: #697184; font-size: 13px; text-align: center; }
+/* QR 框固定白底（掃描需要高對比），裡面的字用固定的深灰 */
+.qr-empty { color: #5d6474; font-size: 13px; text-align: center; }
 .qr-url { font-family: ui-monospace, monospace; font-size: 12px; color: var(--accent); word-break: break-all; text-align: center; margin-bottom: 10px; min-height: 16px; }
 .warn-note {
-  font-size: 12px; line-height: 1.6; color: var(--warn-text); margin: 10px 0 0;
+  font-size: 12px; line-height: 1.6; color: var(--warn-text); margin: 10px 0 0; display: flex; gap: 8px; align-items: flex-start;
   background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 9px 12px;
 }
 #tunnel-toggle.on { background: var(--text); color: var(--bg); box-shadow: none; }
@@ -748,21 +782,43 @@ select {
 .tour-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--line); transition: .2s; }
 .tour-dots i.on { background: var(--brand); width: 20px; border-radius: 4px; }
 
-/* ── 顯示卡加速 ── */
-.gpu-dialog {
-  position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center; padding: 16px;
-  background: var(--overlay); backdrop-filter: blur(4px);
+/* ── 對話框（通用、顯示卡加速）與提示訊息 ── */
+.modal {
+  position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: var(--overlay);
 }
-.gpu-dialog.hidden { display: none; }
-.gpu-dialog-card {
-  width: min(460px, 100%); background: var(--surface); border-radius: var(--radius);
+.modal.hidden { display: none; }
+.dialog-card {
+  width: min(460px, 100%); max-height: calc(100dvh - 32px); overflow: auto;
+  background: var(--surface); border-radius: var(--radius);
   border-top: 5px solid var(--brand); padding: 22px; box-shadow: 0 18px 50px rgba(0, 0, 0, .3);
+  animation: dialog-in .16s ease-out;
 }
-.gpu-dialog-card h3 { font-size: 18px; letter-spacing: 0; margin: 6px 0 10px; }
-.gpu-dialog-card p, #gpu-settings p { color: var(--muted); font-size: 14px; line-height: 1.7; margin: 6px 0; }
-.gpu-dialog-card .progress, #gpu-settings .progress { max-width: none; }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+.dialog-card h3 { font-size: 18px; letter-spacing: 0; margin: 6px 0 10px; }
+.dialog-card p, #gpu-settings p { color: var(--muted); font-size: 14px; line-height: 1.7; margin: 6px 0; }
+.dialog-actions { justify-content: flex-end; }
+.dialog-card .progress, #gpu-settings .progress { max-width: none; }
 .gpu-name { color: var(--text); font-weight: 700; }
 .gpu-error { color: var(--danger); }
+
+.toasts {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 90;
+  display: flex; flex-direction: column; gap: 8px; width: min(520px, calc(100vw - 32px)); pointer-events: none;
+}
+.toast {
+  pointer-events: auto; display: flex; align-items: center; gap: 10px; padding: 10px 10px 10px 16px;
+  border-radius: 14px; background: var(--text); color: var(--bg); box-shadow: var(--shadow-lift);
+  font-size: 14px; animation: toast-in .2s ease-out;
+}
+.toast.error { background: var(--danger); color: #fff; }
+.toast.warn { background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-line); }
+.toast.ok { background: var(--ok); color: #fff; }
+.toast .grow { flex: 1; min-width: 0; }
+.toast button.ghost { background: transparent; color: inherit; border-color: currentColor; }
+.toast-x { background: none; border: none; color: inherit; padding: 4px; opacity: .75; }
+.toast.out { opacity: 0; transform: translateY(6px); transition: .2s; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 
 /* ── 設定 ── */
 .profile-list { list-style: none; padding: 0; margin: 0; }
@@ -778,17 +834,34 @@ select {
 .slider-row { display: flex; align-items: center; gap: 14px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
 label.slider-row { padding: 4px 0; cursor: pointer; }
 label.slider-row span { color: var(--text); }
+/* 麥克風測試音量表：白線是靜音門檻，超過才算歌聲 */
+.meter { position: relative; height: 12px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); margin: 10px 0; overflow: hidden; }
+.meter-fill { height: 100%; width: 0; background: var(--faint); transition: width .06s linear; }
+.meter-fill.voice { background: var(--ok); }
+.meter-mark { position: absolute; top: -2px; bottom: -2px; width: 3px; margin-left: -1px; background: var(--text); border-radius: 2px; }
+.lan-pick { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+#tunnel-copy { margin-left: 4px; }
+
 /* 外觀切換：三段式 */
 .segmented { display: inline-flex; padding: 3px; gap: 2px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); }
 .segmented button { border: none; background: transparent; padding: 6px 14px; font-size: 13px; font-weight: 700; color: var(--muted); }
 .segmented button.on { background: var(--surface); color: var(--brand); box-shadow: var(--shadow); }
 
+/* 演唱中把導覽列都收起來：佔高度，又容易在唱歌時誤觸。
+   離開演唱用左上角的返回鈕。 */
+body[data-screen="sing"] .bottom-nav { display: none !important; }
+
 @media (max-width: 640px) {
   .topbar { padding: 0 16px; height: 52px; }
   .topbar nav { display: none; }
-  .brand .jp { font-size: 17px; }
-  .brand .jp::before { width: 26px; height: 26px; font-size: 15px; }
-  .brand .zh { font-size: 11px; }
+  .brand .name { font-size: 17px; }
+  .brand .logo { width: 26px; height: 26px; }
+  body[data-screen="sing"] .topbar { display: none; }
+  body[data-screen="sing"] .screen.sing { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .toasts { bottom: calc(78px + env(safe-area-inset-bottom)); }
+  body[data-screen="sing"] .toasts { bottom: 16px; }
+  .timeline-bar .stat { margin-left: 0; width: 100%; border-radius: 12px; line-height: 1.6; }
+  .library-head { flex-wrap: wrap; }
 
   .bottom-nav {
     display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
@@ -806,7 +879,12 @@ label.slider-row span { color: var(--text); }
 
   /* 演唱畫面標題列在窄螢幕拆成兩排：曲名／分數一排，控制鍵另一排 */
   .sing-row.title-row, .sing-row.controls-row { flex: 1 1 100%; }
-  .sing-row.controls-row { justify-content: space-between; }
+  .sing-row.controls-row { justify-content: space-between; gap: 6px; }
+  /* 窄螢幕：歌詞鈕只留圖示，整排才放得下 */
+  #lyrics-toggle { font-size: 0; gap: 0; width: 30px; height: 30px; padding: 4px; }
+  #lyrics-toggle .ic { font-size: 13px; }
+  .key-control { gap: 2px; }
+  #key-value { min-width: 40px; }
   .sing-cover { width: 42px; height: 42px; }
   .sing-title { font-size: 16px; }
   .live-score span { font-size: 24px; }
@@ -816,7 +894,7 @@ label.slider-row span { color: var(--text); }
   select { width: 100%; }
 
   /* 音程條讓一點高度給歌詞，兩者都要看得到 */
-  #stage { height: min(38vh, 320px); }
+  #stage { height: min(38vh, 320px); height: min(38dvh, 320px); }
   .lyrics-panel { min-height: 108px; padding: 10px 12px; }
   .lyrics-panel.dam { min-height: 132px; padding: 4px 2px; }
   .lyr-slot { padding-right: 6%; }
@@ -825,4 +903,22 @@ label.slider-row span { color: var(--text); }
   .lyrics-form label, .lyrics-form label:not(.grow) input { width: 100%; }
   .chart-head { gap: 12px; }
   .cover-thumb { width: 64px; height: 64px; }
+}
+
+/* 手機橫放唱歌：高度很少，標題列與歌詞縮小，把空間留給音程條 */
+@media (orientation: landscape) and (max-height: 520px) {
+  body[data-screen="sing"] .topbar, body[data-screen="sing"] .bottom-nav { display: none !important; }
+  .screen.sing { padding: 8px 16px 8px; }
+  .sing-cover { width: 34px; height: 34px; }
+  .sing-title { font-size: 15px; }
+  .live-score span { font-size: 22px; }
+  #stage { height: 52dvh; }
+  .lyrics-panel.dam { min-height: 0; padding: 0 2%; }
+  .lyr-slot .lyr-text { font-size: clamp(18px, 3.2vw, 30px); }
+  .sing-foot { margin-top: 4px; }
+  #latency-note { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }

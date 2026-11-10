@@ -19,7 +19,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import librosa
 import numpy as np
 
 import analyze as A

@@ -13,10 +13,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -152,11 +154,25 @@ def _probe(device: str, timeout: float = 180.0) -> bool:
     return False
 
 
+_DEVICE_LOCK = threading.Lock()
+
+
 def pick_device(force: str | None = None) -> str:
-    """挑出可用且真的跑得動的運算裝置。結果會快取，不必每首歌重測。"""
-    global _device_cache
+    """挑出可用且真的跑得動的運算裝置。結果會快取，不必每首歌重測。
+
+    啟動器的暖機、設定頁的查詢、第一首歌的分析可能同時呼叫這裡，用鎖讓
+    探測子行程只跑一次，其他呼叫者等結果就好。
+    """
     if force:
         return force
+    if _device_cache:
+        return _device_cache
+    with _DEVICE_LOCK:
+        return _pick_device_locked()
+
+
+def _pick_device_locked() -> str:
+    global _device_cache
     if _device_cache:
         return _device_cache
 
@@ -789,8 +805,11 @@ def detect_techniques(notes: list[dict], frames: dict) -> list[dict]:
     events = []
 
     def cents_in(note, start_ms, end_ms):
-        i0 = max(0, int(round(start_ms / hop_ms)))
-        i1 = min(len(midi), int(round(end_ms / hop_ms)) + 1)
+        # 取 start_ms <= t <= end_ms 的音框，與 js/dsp.js 的 framesInRange 同語意。
+        # 以前用 round() 換算索引：邊界剛好落在半格時 Python 的銀行家捨入
+        # 會多抓或少抓一框，前後端標出來的技巧就對不上。
+        i0 = max(0, math.ceil(start_ms / hop_ms - 1e-9))
+        i1 = min(len(midi), math.floor(end_ms / hop_ms + 1e-9) + 1)
         seg = [midi[i] for i in range(i0, i1) if midi[i] > 0 and conf[i] >= min_conf]
         return (np.array(seg) - note["midi"]) * 100 if seg else np.array([])
 

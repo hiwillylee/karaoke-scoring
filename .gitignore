@@ -19,3 +19,9 @@ work/
 
 # 備份檔
 *.bak
+
+# 開發工具
+node_modules/
+package-lock.json
+settings.json
+latency.json

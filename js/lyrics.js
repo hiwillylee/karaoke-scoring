@@ -8,6 +8,8 @@
 //
 // 日文另有振假名（ruby）與羅馬拼音，可在設定裡開關。
 
+import { escapeHtml } from './util.js';
+
 const SMALL_KANA = new Set('ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ');
 const isKana = (c) => (c >= 'ぁ' && c <= 'ゟ') || (c >= 'ァ' && c <= 'ヿ');
 const isKanji = (c) => (c >= '一' && c <= '鿿') || (c >= '㐀' && c <= '䶿') || '々〆ヶ〇'.includes(c);
@@ -122,11 +124,6 @@ export function prepareLines(data, notes = []) {
     l.estimated = !!l.ct;
   }
   return lines;
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 const isInterlude = (text) => !text.replace(/[\s♪♫♬・…~～]/g, '');
@@ -245,9 +242,16 @@ export class LyricsView {
     const romaji = (l) => (this.opts.romaji && l?.romaji ? `<div class="lyr-romaji">${escapeHtml(l.romaji)}</div>` : '');
     const interlude = (l) => isInterlude(l.text);
     const wipe = this.opts.karaoke && line.ct ? ' wipe' : '';
-    const body = (l, withChars) => (l
-      ? `<div class="lyr-text">${interlude(l) ? '♪' : this.lineHtml(l, withChars)}</div>${romaji(l)}`
-      : '');
+    // 逐字上色的那一句疊兩層：底層是靜態的描邊字（濾鏡只算一次），
+    // 上層只負責上色、不套濾鏡。以前描邊濾鏡直接套在每一幀都在變的漸層上，
+    // 整句每一幀都要重算，是演唱畫面最貴的一步。
+    const text = (l, withChars) => {
+      if (interlude(l)) return `<div class="lyr-text">♪</div>`;
+      if (!withChars || !wipe) return `<div class="lyr-text">${this.lineHtml(l, withChars)}</div>`;
+      return `<div class="lyr-stack"><div class="lyr-text lyr-under" aria-hidden="true">${this.lineHtml(l, false)}</div>`
+        + `<div class="lyr-text lyr-top">${this.lineHtml(l, true)}</div></div>`;
+    };
+    const body = (l, withChars) => (l ? `${text(l, withChars)}${romaji(l)}` : '');
     if (this.opts.layout === 'dam') {
       // 卡拉OK的兩行交錯：第偶數句固定在上行（靠左）、奇數句在下行（靠右）。
       // 唱到下一句時只換掉唱完的那一行，另一行原地不動，眼睛不必跟著跳。
@@ -269,7 +273,8 @@ export class LyricsView {
         const i = Number(el.dataset.i);
         this.chars.push({ el, s: line.ct[i * 2], e: line.ct[i * 2 + 1], p: -1 });
       }
-      for (const el of this.bigEl.querySelectorAll('ruby')) {
+      const top = this.bigEl.querySelector('.lyr-top') || this.bigEl;
+      for (const el of top.querySelectorAll('ruby')) {
         this.rubies.push({ el, s: line.ct[Number(el.dataset.a) * 2], sung: null });
       }
     }

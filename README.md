@@ -18,7 +18,18 @@
 .venv/bin/python server.py      # http://localhost:8000
 ```
 
-測試：`test/test_analyze.py`、`test/test_library.py`、`test/test_lyrics.py`，前端開 `/test/pitch-test.html`。
+測試：
+
+```bash
+python3 test/test_library.py    # 曲庫與網址
+python3 test/test_server.py     # 伺服器安全（白名單、CSRF、公開網址存取碼）與協定
+python3 test/test_parity.py     # Python／JS 兩份切段與技巧偵測必須一致（需要 node）
+.venv/bin/python test/test_analyze.py   # 音高抽取（需要完整環境）
+.venv/bin/python test/test_lyrics.py
+```
+
+前端開 `/test/pitch-test.html`。靜態檢查：`ruff check .`、`npm install && npx eslint js`。
+推上 GitHub 時 CI（`.github/workflows/ci.yml`）會跑上面不需要 torch 的那幾項。
 
 打包見 [`打包說明.md`](打包說明.md)。
 

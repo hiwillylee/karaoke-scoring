@@ -2,71 +2,119 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#d7263d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="唱歌評分">
 <script>
-  // 外觀設定在樣式載入前就套上，避免先閃一下另一種顏色（js/theme.js 會同步寫這個值）
-  try { const t = localStorage.getItem('theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+  // 外觀在樣式載入前就解析好（跟隨系統時依 prefers-color-scheme），避免先閃一下另一種顏色。
+  // js/theme.js 之後接手，並同步寫這個值。
+  try {
+    var t = localStorage.getItem('theme');
+    var dark = t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    document.documentElement.dataset.themePref = t === 'light' || t === 'dark' ? t : 'auto';
+  } catch (e) { document.documentElement.dataset.theme = 'light'; }
 </script>
-<title>カラオケ 精密採點</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23d7263d'/%3E%3Crect x='6' y='18' width='7' height='3.4' rx='1.7' fill='%23fff' opacity='.9'/%3E%3Crect x='14' y='12' width='8' height='3.4' rx='1.7' fill='%23fff'/%3E%3Crect x='22.5' y='16' width='4' height='3.4' rx='1.7' fill='%23fff' opacity='.9'/%3E%3Crect x='6' y='23.5' width='20' height='2.2' rx='1.1' fill='%23ffc83d'/%3E%3C/svg%3E">
+<title>唱歌評分</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icons/icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 
+<!-- 圖示：一套內嵌 SVG，各作業系統長得一樣（以前用 emoji 與符號字元，每個平台都不同） -->
+<svg id="icon-sprite" width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.2"/><path d="M11 18.5h2"/></symbol>
+    <symbol id="i-library" viewBox="0 0 24 24"><path d="M9 18V5.5l11-2v12.5"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21M8.5 21h7"/></symbol>
+    <symbol id="i-piano" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M13 4v16M18 4v16"/><path d="M6.5 4v8M11 4v8M16 4v8" stroke-width="3"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M15.5 4.5l4 4L8 20H4v-4z"/><path d="M13 7l4 4"/></symbol>
+    <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.6 6.6a7.5 7.5 0 1010.8 0"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+    <symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5V13l2.5 2M9.5 2.5h5"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7.5 5v14M16.5 5v14" stroke-width="3"/></symbol>
+    <symbol id="i-restart" viewBox="0 0 24 24"><path d="M4 12a8 8 0 108-8 8.3 8.3 0 00-6 2.6"/><path d="M4 3.5v4h4"/></symbol>
+    <symbol id="i-skip" viewBox="0 0 24 24"><path d="M5 5l9 7-9 7zM18 5v14"/></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 010 6M18 6.5a7.5 7.5 0 010 11"/></symbol>
+    <symbol id="i-fullscreen" viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.9z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13M10.5 11v5.5M13.5 11v5.5"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14L4.5 9.5 9 5"/><path d="M4.5 9.5H15a5 5 0 010 10h-4"/></symbol>
+    <symbol id="i-redo" viewBox="0 0 24 24"><path d="M15 14l4.5-4.5L15 5"/><path d="M19.5 9.5H9a5 5 0 000 10h4"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15.5V4.5M7.5 9L12 4.5 16.5 9M5 19.5h14"/></symbol>
+    <symbol id="i-zoom-in" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8.5 11h5M11 8.5v5"/></symbol>
+    <symbol id="i-zoom-out" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8.5 11h5"/></symbol>
+    <symbol id="i-lyrics" viewBox="0 0 24 24"><path d="M4 6h16M4 11h16M4 16h10"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3.5l9.5 16.5h-19z"/><path d="M12 10v4.5M12 17.2v.3"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor"/></symbol>
+  </defs>
+</svg>
+
 <header class="topbar">
-  <div class="brand"><span class="jp">カラオケ</span><span class="zh">精密採點</span></div>
-  <nav>
-    <button class="ghost hidden" id="nav-connect" data-goto="connect">📱 手機連線</button>
-    <button class="ghost" data-goto="library">曲庫</button>
-    <button class="ghost" data-goto="calibrate">延遲校準</button>
-    <button class="ghost" data-goto="settings">設定</button>
-    <button class="ghost danger hidden" id="nav-quit" title="關閉這台電腦上的唱歌評分程式">⏻ 關閉程式</button>
+  <div class="brand"><span class="logo" aria-hidden="true"><svg class="ic"><use href="#i-library"/></svg></span><span class="name">唱歌評分</span></div>
+  <nav aria-label="主選單">
+    <button class="ghost hidden" id="nav-connect" data-goto="connect"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg>手機連線</button>
+    <button class="ghost" data-goto="library"><svg class="ic" aria-hidden="true"><use href="#i-library"/></svg>曲庫</button>
+    <button class="ghost" data-goto="calibrate"><svg class="ic" aria-hidden="true"><use href="#i-timer"/></svg>延遲校準</button>
+    <button class="ghost" data-goto="settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg>設定</button>
   </nav>
 </header>
 
-<nav class="bottom-nav">
-  <button data-goto="library">曲庫</button>
-  <button data-goto="calibrate">校準</button>
-  <button data-goto="settings">設定</button>
+<nav class="bottom-nav" aria-label="主選單">
+  <button data-goto="library"><svg class="ic" aria-hidden="true"><use href="#i-library"/></svg>曲庫</button>
+  <button data-goto="calibrate"><svg class="ic" aria-hidden="true"><use href="#i-timer"/></svg>校準</button>
+  <button data-goto="settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg>設定</button>
 </nav>
 
+<main>
 <!-- ── 曲庫 ───────────────────────────────────────────────── -->
 <section id="screen-library" class="screen active">
   <div class="search-row" id="dropzone">
     <div class="search-field">
-      <span class="search-icon">⌕</span>
-      <input type="search" id="search-input" autocomplete="off" spellcheck="false"
+      <svg class="ic search-icon" aria-hidden="true"><use href="#i-search"/></svg>
+      <input type="search" id="search-input" autocomplete="off" spellcheck="false" aria-label="搜尋或貼上網址"
              placeholder="搜尋歌名或歌手，或貼上 YouTube／YouTube Music／Bilibili 網址">
-      <button class="search-clear hidden" id="search-clear" title="清除">✕</button>
+      <button class="search-clear hidden" id="search-clear" aria-label="清除搜尋"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
-    <button class="upload-btn" id="upload-btn" title="上傳本機音檔">＋</button>
-    <input type="file" id="file-input" accept="audio/*" hidden>
+    <button class="upload-btn" id="upload-btn" aria-label="上傳本機音檔" title="上傳本機音檔"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button>
+    <input type="file" id="file-input" accept="audio/*,video/*" hidden>
   </div>
-  <div id="search-status" class="search-status hidden"></div>
-  <div id="backend-warning" class="banner warn hidden"></div>
-  <div class="library-head"><h2>曲庫</h2><span class="muted small" id="library-count"></span></div>
+  <div id="search-status" class="search-status hidden" role="status"></div>
+  <div id="job-list" class="job-list"></div>
+  <div class="library-head">
+    <h2>曲庫</h2>
+    <span class="muted small" id="library-count"></span>
+    <label class="sort-select">
+      <span class="sr-only">排序</span>
+      <select id="sort-select" aria-label="排序方式">
+        <option value="added">最新加入</option>
+        <option value="recent">最近唱過</option>
+        <option value="name">歌名</option>
+        <option value="best">最高分</option>
+        <option value="fav">我的最愛</option>
+      </select>
+    </label>
+  </div>
   <div class="artist-bar" id="artist-bar"></div>
   <div id="song-list" class="song-grid"></div>
-</section>
-
-<!-- ── 分析中 ─────────────────────────────────────────────── -->
-<section id="screen-analyze" class="screen center">
-  <h2 id="analyze-title">分析中</h2>
-  <div class="progress"><div class="progress-bar" id="analyze-bar"></div></div>
-  <p class="muted" id="analyze-message">準備中…</p>
-  <ol class="stages">
-    <li data-stage="separate">音源分離（人聲／伴奏）</li>
-    <li data-stage="pitch">抽取原唱音高</li>
-    <li data-stage="technique">標記原唱技巧</li>
-  </ol>
-  <p class="hint">第一次執行會下載分離模型，需要多等一會兒。</p>
 </section>
 
 <!-- ── 譜面確認 ───────────────────────────────────────────── -->
 <section id="screen-chart" class="screen">
   <div class="chart-head">
-    <button class="cover-thumb" id="chart-cover" title="更換封面（JPG／PNG／WebP）"></button>
+    <button class="cover-thumb" id="chart-cover" aria-label="更換封面（JPG／PNG／WebP）"></button>
     <input type="file" id="cover-file" accept="image/jpeg,image/png,image/webp" hidden>
     <div class="grow">
       <h2>譜面確認</h2>
@@ -78,22 +126,22 @@
       </div>
     </div>
   </div>
-  <p class="muted">播放並拖曳時間軸，確認音程條的走勢跟旋律對得上。對不上時到「進階」調整。</p>
-  <canvas id="chart-preview" class="preview"></canvas>
-  <canvas id="chart-overview" class="overview" title="全曲總覽：點一下或拖曳可跳到該處"></canvas>
+  <p class="muted">播放並拖曳時間軸，確認音程條的走勢跟旋律對得上。對不上時到「進階」調整，或按「編輯譜面」直接改。</p>
+  <canvas id="chart-preview" class="preview" aria-label="音程條預覽，可左右拖曳"></canvas>
+  <canvas id="chart-overview" class="overview" aria-label="全曲總覽：點一下或拖曳可跳到該處"></canvas>
   <div class="timeline-bar">
-    <button id="preview-back5" class="ghost tiny" title="往前 5 秒">《 5秒</button>
-    <button id="preview-play" class="primary tiny">播放</button>
-    <button id="preview-fwd5" class="ghost tiny" title="往後 5 秒">5秒 》</button>
-    <button id="preview-vocal" class="ghost tiny on" title="原唱人聲">🎤 原唱</button>
-    <button id="preview-piano" class="ghost tiny" title="用鋼琴彈出抽到的譜，跟原唱比對">🎹 鋼琴</button>
+    <button id="preview-back5" class="ghost tiny" aria-label="往前 5 秒">−5 秒</button>
+    <button id="preview-play" class="primary tiny" disabled>播放</button>
+    <button id="preview-fwd5" class="ghost tiny" aria-label="往後 5 秒">+5 秒</button>
+    <button id="preview-vocal" class="ghost tiny on" aria-pressed="true"><svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg>原唱</button>
+    <button id="preview-piano" class="ghost tiny" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-piano"/></svg>鋼琴</button>
     <span class="time" id="preview-time">0:00 / 0:00</span>
     <span class="stat" id="chart-stats"></span>
   </div>
   <p class="hint">
     上方音程條可左右拖曳細看；下方細長條是全曲總覽，點一下就能跳到那一段。<br>
-    <strong>「🎹 鋼琴」會把抽到的譜彈出來</strong>——關掉「🎤 原唱」交替聽，
-    鋼琴跟原唱差一個八度就是抽錯了，按下方的「✎ 編輯譜面」改掉。
+    <strong>「鋼琴」會把抽到的譜彈出來</strong>——關掉「原唱」交替聽，
+    鋼琴跟原唱差一個八度就是抽錯了，按下方的「編輯譜面」改掉。
   </p>
 
   <div class="card lyrics-card">
@@ -132,7 +180,11 @@
 
   <details class="advanced">
     <summary>進階</summary>
-    <div class="controls">
+    <p class="banner warn hidden" id="advanced-locked">
+      這首歌的譜面手動編輯過，下面三個滑桿只影響「自動產生」的譜，現在沒有作用。
+      要讓滑桿重新生效，到「編輯譜面」按「捨棄所有編輯」。
+    </p>
+    <div class="controls" id="advanced-controls">
       <label>八度位移
         <input type="range" id="octave-slider" min="-1" max="1" step="1" value="0">
         <output id="octave-value">0</output>
@@ -147,15 +199,15 @@
       </label>
     </div>
     <p class="muted small">
-        整首高／低一個八度時調「八度位移」；旋律斷斷續續時把「偵測靈敏度」調低；
-        <strong>看得到音符卻聽不到聲音</strong>時把「音量門檻」往右調，可濾掉分離後殘留的伴奏與殘響。
-      </p>
-
+      整首高／低一個八度時調「八度位移」；旋律斷斷續續時把「偵測靈敏度」調低；
+      <strong>看得到音符卻聽不到聲音</strong>時把「音量門檻」往右調，可濾掉分離後殘留的伴奏與殘響。
+      調整會自動存起來。
+    </p>
   </details>
 
   <div class="row">
     <button id="chart-confirm" class="primary">確認，開始唱</button>
-    <button id="chart-edit" class="ghost">✎ 編輯譜面</button>
+    <button id="chart-edit" class="ghost"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg>編輯譜面</button>
     <button id="chart-back" class="ghost">回曲庫</button>
   </div>
 </section>
@@ -165,34 +217,37 @@
   <h2>編輯譜面 <span class="muted small" id="edit-song-name"></span></h2>
   <p class="muted">
     抽出來的譜不會完美。點一下選音符，拖曳移動，拖兩端改長度，
-    <kbd>Delete</kbd> 刪除，<kbd>Alt</kbd>＋點空白處或雙擊新增。<br>
-    上方的<strong>時間尺</strong>可以點或拖曳決定從哪裡播，也可以直接抓住白色播放線拖。
+    <kbd>Delete</kbd> 刪除，<kbd>Alt</kbd>＋點空白處、雙擊或按「新增音符」新增。<br>
+    上方的<strong>時間尺</strong>可以點或拖曳決定從哪裡播，也可以直接抓住白色播放線拖。手機上可以用兩指縮放。
   </p>
-  <canvas id="edit-roll" class="roll"></canvas>
+  <canvas id="edit-roll" class="roll" aria-label="鋼琴捲軸譜面編輯器"></canvas>
 
   <div class="timeline-bar">
-    <button id="edit-play" class="primary tiny">播放</button>
-    <button id="edit-vocal" class="ghost tiny on" title="原唱人聲">🎤 原唱</button>
-    <button id="edit-piano" class="ghost tiny on" title="用鋼琴彈出目前的譜">🎹 鋼琴</button>
-    <span class="time" id="edit-time">0:00 / 0:00</span>
+    <button id="edit-play" class="primary tiny" disabled>播放</button>
+    <button id="edit-vocal" class="ghost tiny on" aria-pressed="true"><svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg>原唱</button>
+    <button id="edit-piano" class="ghost tiny on" aria-pressed="true"><svg class="ic" aria-hidden="true"><use href="#i-piano"/></svg>鋼琴</button>
+    <button id="edit-zoom-out" class="ghost tiny icon-only" aria-label="縮小"><svg class="ic" aria-hidden="true"><use href="#i-zoom-out"/></svg></button>
+    <button id="edit-zoom-in" class="ghost tiny icon-only" aria-label="放大"><svg class="ic" aria-hidden="true"><use href="#i-zoom-in"/></svg></button>
+    <span class="time" id="edit-time">載入音軌中…</span>
     <span class="stat" id="edit-sel">未選取</span>
   </div>
 
   <div class="controls">
+    <button id="edit-add" class="ghost tiny"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>新增音符</button>
     <button id="edit-oct-up" class="ghost tiny">+1 八度</button>
     <button id="edit-oct-down" class="ghost tiny">−1 八度</button>
     <button id="edit-semi-up" class="ghost tiny">+1 半音</button>
     <button id="edit-semi-down" class="ghost tiny">−1 半音</button>
     <button id="edit-longer" class="ghost tiny">變長</button>
     <button id="edit-shorter" class="ghost tiny">變短</button>
-    <button id="edit-delete" class="ghost tiny danger">刪除</button>
-    <button id="edit-undo" class="ghost tiny">↶ 復原</button>
-    <button id="edit-redo" class="ghost tiny">↷ 重做</button>
+    <button id="edit-delete" class="ghost tiny danger"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg>刪除</button>
+    <button id="edit-undo" class="ghost tiny"><svg class="ic" aria-hidden="true"><use href="#i-undo"/></svg>復原</button>
+    <button id="edit-redo" class="ghost tiny"><svg class="ic" aria-hidden="true"><use href="#i-redo"/></svg>重做</button>
   </div>
   <p class="hint">
     快捷鍵：<kbd>↑</kbd><kbd>↓</kbd> 半音、<kbd>⇧↑</kbd><kbd>⇧↓</kbd> 八度、
-    <kbd>←</kbd><kbd>→</kbd> 前後移動、<kbd>⌘Z</kbd> 復原、<kbd>⌘A</kbd> 全選、
-    <kbd>空白鍵</kbd> 播放／暫停。滾輪橫向捲動，<kbd>⌘</kbd>＋滾輪縮放。
+    <kbd>←</kbd><kbd>→</kbd> 前後移動、<kbd><span class="mod-key">Ctrl</span>Z</kbd> 復原、<kbd><span class="mod-key">Ctrl</span>A</kbd> 全選、
+    <kbd>空白鍵</kbd> 播放／暫停。滾輪橫向捲動，<kbd class="mod-key">Ctrl</kbd>＋滾輪縮放。
   </p>
 
   <div class="row">
@@ -200,7 +255,7 @@
     <button id="edit-revert" class="ghost">捨棄所有編輯，重新從音訊產生</button>
     <button id="edit-cancel" class="ghost">取消</button>
   </div>
-  <p class="muted small" id="edit-status"></p>
+  <p class="muted small" id="edit-status" role="status"></p>
 </section>
 
 <!-- ── 演唱 ───────────────────────────────────────────────── -->
@@ -208,34 +263,43 @@
   <div class="backdrop" id="sing-backdrop"></div>
   <div class="sing-head">
     <div class="sing-row title-row">
+      <button class="ghost tiny icon-only sing-exit" id="sing-exit" aria-label="離開演唱"><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg></button>
       <div class="sing-meta">
         <div class="sing-cover" id="sing-cover"></div>
         <div class="sing-title" id="sing-song-name"></div>
       </div>
-      <div class="live-score"><span id="live-score">0</span><small>分</small></div>
+      <div class="live-score" aria-live="off"><span id="live-score">0</span><small>分</small></div>
     </div>
     <div class="sing-row controls-row">
-      <button class="ghost tiny" id="guide-toggle" title="播放原唱當導唱。用喇叭時原唱會被麥克風收到，建議戴耳機">原唱 關</button>
-      <button class="ghost tiny on" id="lyrics-toggle" title="顯示／隱藏歌詞">歌詞</button>
-      <div class="key-control">
-        <button class="ghost tiny" id="key-down">♭</button>
-        <span id="key-value">原調</span>
-        <button class="ghost tiny" id="key-up">♯</button>
+      <button class="ghost tiny" id="guide-toggle" aria-pressed="false" title="播放原唱當導唱。用喇叭時原唱會被麥克風收到，建議戴耳機">原唱 關</button>
+      <button class="ghost tiny icon-only" id="volume-toggle" aria-label="音量" aria-expanded="false"><svg class="ic" aria-hidden="true"><use href="#i-volume"/></svg></button>
+      <button class="ghost tiny on" id="lyrics-toggle" aria-pressed="true" title="顯示／隱藏歌詞"><svg class="ic" aria-hidden="true"><use href="#i-lyrics"/></svg>歌詞</button>
+      <div class="key-control" role="group" aria-label="升降調">
+        <button class="ghost tiny" id="key-down" aria-label="降半音">♭</button>
+        <span id="key-value" aria-live="polite">原調</span>
+        <button class="ghost tiny" id="key-up" aria-label="升半音">♯</button>
       </div>
+      <button class="ghost tiny icon-only hidden" id="fullscreen-toggle" aria-label="全螢幕"><svg class="ic" aria-hidden="true"><use href="#i-fullscreen"/></svg></button>
     </div>
+  </div>
+  <div class="volume-panel hidden" id="volume-panel">
+    <label class="slider-row"><span>伴奏</span><input type="range" id="backing-vol" min="0" max="1" step="0.05" value="0.9"><output id="backing-vol-value">90%</output></label>
+    <label class="slider-row"><span>原唱</span><input type="range" id="guide-vol" min="0" max="1" step="0.05" value="0.75"><output id="guide-vol-value">75%</output></label>
   </div>
   <div class="progress thin"><div class="progress-bar" id="sing-bar"></div></div>
   <div class="stage-wrap">
-    <canvas id="stage"></canvas>
-    <div id="countdown" class="countdown hidden"></div>
+    <canvas id="stage" aria-label="即時音程條"></canvas>
+    <div id="countdown" class="countdown hidden" aria-live="assertive"></div>
     <div id="tech-popup" class="tech-popup"><canvas width="132" height="66"></canvas></div>
+    <button id="skip-intro" class="skip-btn hidden"><svg class="ic" aria-hidden="true"><use href="#i-skip"/></svg><span>跳過前奏</span></button>
   </div>
   <div id="sing-lyrics" class="lyrics-panel dam"></div>
   <div class="sing-foot">
-    <div id="pitch-hint" class="pitch-hint">—</div>
+    <div id="pitch-hint" class="pitch-hint idle">等待歌聲</div>
     <div class="row">
-      <button id="sing-toggle" class="primary">暫停</button>
-      <button id="sing-stop" class="ghost">結束並計分</button>
+      <button id="sing-restart" class="ghost" disabled><svg class="ic" aria-hidden="true"><use href="#i-restart"/></svg>重來</button>
+      <button id="sing-toggle" class="primary" disabled>暫停</button>
+      <button id="sing-stop" class="ghost">取消</button>
     </div>
     <div class="muted small" id="latency-note"></div>
   </div>
@@ -246,10 +310,11 @@
   <div class="backdrop" id="result-backdrop"></div>
   <div class="result-head">
     <canvas id="particles" class="particles"></canvas>
-    <div class="result-song"><div class="sing-cover" id="result-cover"></div><div class="t" id="result-song-name"></div></div><br>
-    <div class="grade" id="result-grade">—</div>
-    <div class="big-score"><span id="result-score">0.0</span><small>分</small></div>
+    <div class="result-song"><div class="sing-cover" id="result-cover"></div><div class="t" id="result-song-name"></div></div>
+    <div><div class="grade" id="result-grade">—</div></div>
+    <div class="big-score"><span class="num" id="result-score">0.0</span><small>分</small></div>
     <div class="comment" id="result-comment"></div>
+    <div class="result-flag hidden" id="result-flag"></div>
   </div>
   <div class="result-grid">
     <div class="card">
@@ -262,14 +327,21 @@
       <div class="muted small" id="tech-note"></div>
       <h3 class="mt">紀錄</h3>
       <div class="muted small" id="best-note"></div>
+      <ol class="history-list" id="history-list"></ol>
     </div>
   </div>
   <div class="card">
     <h3>整曲音程對照<span class="legend"><i class="ref"></i>參考譜<i class="usr"></i>實唱</span></h3>
-    <canvas id="compare" class="compare"></canvas>
+    <div class="segmented compare-zoom" id="compare-zoom" role="group" aria-label="縮放">
+      <button data-zoom="0" aria-pressed="false">全曲</button>
+      <button data-zoom="40" class="on" aria-pressed="true">放大</button>
+      <button data-zoom="90" aria-pressed="false">細看</button>
+    </div>
+    <div class="compare-wrap" id="compare-wrap"><canvas id="compare" class="compare"></canvas></div>
+    <p class="hint">放大後可以左右拖曳或捲動。</p>
   </div>
   <div class="row">
-    <button id="result-retry" class="primary">再唱一次</button>
+    <button id="result-retry" class="primary"><svg class="ic" aria-hidden="true"><use href="#i-restart"/></svg>再唱一次</button>
     <button id="result-back" class="ghost">回曲庫</button>
   </div>
 </section>
@@ -279,7 +351,7 @@
   <h2>延遲校準</h2>
   <p class="muted">
     麥克風收到的聲音會比實際晚一點。播放節拍後<strong>跟著拍手</strong>，
-    系統會量出這段延遲並記住這組裝置的設定。
+    系統會量出這段延遲並記住這組裝置的設定（存在電腦上，換手機網址也還在）。
   </p>
   <div class="calib-devices">
     <label>麥克風
@@ -289,9 +361,14 @@
       <select id="calib-out"></select>
     </label>
   </div>
-  <p class="hint">校準時請用<strong>外放</strong>並用力拍手；正式演唱時再戴上耳機。</p>
+  <p class="hint" id="calib-out-note"></p>
+  <p class="hint">
+    校準時請用<strong>外放</strong>並用力拍手（戴耳機的話麥克風聽不到節拍）。
+    之後戴耳機唱時，程式會依瀏覽器回報的輸出延遲自動修正差距；
+    藍牙耳機若仍覺得判定偏早或偏晚，到「設定 → 手動微調」調整。
+  </p>
   <div class="beat-dots" id="beat-dots"></div>
-  <p class="muted" id="calib-status">按下開始後會先有 8 拍前導，接著跟著拍 8 下。</p>
+  <p class="muted" id="calib-status" role="status">按下開始後會先有 8 拍前導，接著跟著拍 8 下。</p>
   <div class="row">
     <button id="calib-start" class="primary">開始校準</button>
     <button id="calib-back" class="ghost">返回</button>
@@ -309,6 +386,10 @@
       <h3>同一個 Wi-Fi</h3>
       <div class="qr-box" id="qr-lan"><div class="qr-empty">讀取中…</div></div>
       <div class="qr-url" id="qr-lan-url"></div>
+      <label class="lan-pick hidden" id="lan-pick">
+        <span class="muted small">掃不到的話換一個位址試試：</span>
+        <select id="lan-select"></select>
+      </label>
       <p class="muted small">
         手機要跟這台電腦連同一個 Wi-Fi。第一次連會出現憑證警告，
         選「進階 → 繼續前往」即可——這是自簽憑證的正常現象。
@@ -321,14 +402,16 @@
       <div class="qr-url" id="qr-tunnel-url"></div>
       <div class="row">
         <button class="primary tiny" id="tunnel-toggle">建立公開網址</button>
+        <button class="ghost tiny hidden" id="tunnel-copy">複製網址</button>
       </div>
       <p class="muted small" id="tunnel-note">
         透過 Cloudflare 取得一組臨時網址，<strong>不在同一個 Wi-Fi 也能連</strong>，
         而且是有效憑證、不會有警告。關掉就失效。
       </p>
       <p class="warn-note">
-        ⚠ 這個網址<strong>沒有密碼</strong>，拿到的人就能瀏覽曲庫、加歌、刪歌。
-        只分享給你信任的人，用完請關掉。
+        <svg class="ic" aria-hidden="true"><use href="#i-warn"/></svg>
+        網址裡帶有一組存取碼（QR 裡就有），沒有存取碼的人連不進來；每次建立都會換一組。
+        拿到完整網址的人可以瀏覽曲庫、加歌、唱歌，但不能刪歌。只分享給你信任的人，用完請關掉。
       </p>
       <label class="slider-row">
         <input type="checkbox" id="tunnel-on-start">
@@ -344,35 +427,11 @@
 <section id="screen-settings" class="screen">
   <h2>設定</h2>
   <div class="card">
-    <h3>連線與硬體</h3>
-    <dl id="server-info" class="info-grid muted small">讀取中…</dl>
-  </div>
-  <div class="card hidden" id="gpu-card">
-    <h3>顯示卡加速</h3>
-    <div id="gpu-settings"></div>
-  </div>
-  <div class="card">
-    <h3>延遲設定檔</h3>
-    <p class="muted small">每一組「麥克風 × 輸出裝置」各自記一份，換耳機不用重測。</p>
-    <ul id="profile-list" class="profile-list"></ul>
-  </div>
-  <div class="card">
-    <h3>手動微調</h3>
-    <label class="slider-row">
-      <span>目前裝置的延遲</span>
-      <input type="range" id="manual-latency" min="-200" max="400" step="5" value="0">
-      <output id="manual-latency-value">0 ms</output>
-    </label>
-    <p class="muted small">覺得判定偏早就往右調，偏晚就往左調。</p>
-  </div>
-  <div class="card">
-    <h3>本機音軌快取</h3>
-    <p class="muted small">
-      曲庫存在電腦上，這台裝置唱過的歌會把音軌留一份在本機，重唱時就不用再抓。
-    </p>
-    <div class="slider-row">
-      <span id="cache-info" class="muted small">計算中…</span>
-      <button class="ghost tiny" id="cache-clear">清除快取</button>
+    <h3>外觀</h3>
+    <div class="segmented" id="theme-switch" role="group" aria-label="外觀">
+      <button data-theme-pref="auto">跟隨系統</button>
+      <button data-theme-pref="light">淺色</button>
+      <button data-theme-pref="dark">深色</button>
     </div>
   </div>
   <div class="card">
@@ -382,15 +441,29 @@
       <input type="range" id="silence-slider" min="0.002" max="0.05" step="0.002" value="0.008">
       <output id="silence-value">0.008</output>
     </label>
-    <p class="muted small">環境吵雜時調高，避免雜音被當成歌聲。</p>
+    <div class="meter" id="mic-meter" aria-hidden="true">
+      <div class="meter-fill" id="mic-meter-fill"></div>
+      <div class="meter-mark" id="mic-meter-mark"></div>
+    </div>
+    <div class="slider-row">
+      <button class="ghost tiny" id="mic-test"><svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg>測試麥克風</button>
+      <span class="muted small" id="mic-test-note">按下後對著麥克風唱幾聲：綠色超過白線才會被當成歌聲。</span>
+    </div>
+    <p class="muted small">環境吵雜時把門檻往右調，讓安靜時的音量條停在白線左邊。</p>
   </div>
   <div class="card">
-    <h3>外觀</h3>
-    <div class="segmented" id="theme-switch">
-      <button data-theme-pref="auto">跟隨系統</button>
-      <button data-theme-pref="light">淺色</button>
-      <button data-theme-pref="dark">深色</button>
-    </div>
+    <h3>手動微調</h3>
+    <label class="slider-row">
+      <span>延遲補償</span>
+      <input type="range" id="manual-latency" min="-200" max="400" step="5" value="0">
+      <output id="manual-latency-value">0 ms</output>
+    </label>
+    <p class="muted small">覺得判定偏早就往右調，偏晚就往左調。加在校準結果上，所有裝置共用。</p>
+  </div>
+  <div class="card">
+    <h3>延遲設定檔</h3>
+    <p class="muted small">每一組「麥克風 × 輸出裝置」各自記一份，存在電腦上。</p>
+    <ul id="profile-list" class="profile-list"></ul>
   </div>
   <div class="card">
     <h3>歌詞顯示</h3>
@@ -403,16 +476,58 @@
     </p>
   </div>
   <div class="card">
+    <h3>本機音軌快取</h3>
+    <p class="muted small">
+      曲庫存在電腦上，這台裝置唱過的歌會把音軌留一份在本機，重唱時就不用再抓。
+      超過 400 MB 時會自動丟掉最久沒唱的。
+    </p>
+    <div class="slider-row">
+      <span id="cache-info" class="muted small">計算中…</span>
+      <button class="ghost tiny" id="cache-clear">清除快取</button>
+    </div>
+  </div>
+  <div class="card hidden" id="backup-card">
+    <h3>曲庫備份</h3>
+    <p class="muted small">把整個曲庫（音軌、譜面、歌詞、封面、成績）打包成一個 zip，換電腦或重灌時可以還原。</p>
+    <div class="row">
+      <a class="button ghost tiny" id="backup-full" href="api/backup" download><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>下載完整備份</a>
+      <a class="button ghost tiny" id="backup-light" href="api/backup?audio=0" download>只備份譜面與成績（不含音軌）</a>
+      <button class="ghost tiny" id="restore-btn"><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>從備份還原</button>
+      <input type="file" id="restore-file" accept=".zip,application/zip" hidden>
+    </div>
+    <p class="muted small" id="restore-status" role="status"></p>
+  </div>
+  <div class="card hidden" id="gpu-card">
+    <h3>顯示卡加速</h3>
+    <div id="gpu-settings"></div>
+  </div>
+  <div class="card">
     <h3>使用說明</h3>
     <p class="muted small">重新看一次各功能在哪裡的簡短導覽。</p>
     <div class="row"><button class="ghost tiny" id="tour-restart">重看使用說明</button></div>
   </div>
+  <div class="card">
+    <h3>關於</h3>
+    <dl id="server-info" class="info-grid muted small">讀取中…</dl>
+  </div>
+  <div class="card hidden" id="quit-card">
+    <h3>關閉程式</h3>
+    <p class="muted small">關掉這台電腦上的唱歌評分。關掉之後，手機也連不進來了。</p>
+    <div class="row"><button class="ghost tiny danger" id="nav-quit"><svg class="ic" aria-hidden="true"><use href="#i-power"/></svg>關閉程式</button></div>
+  </div>
   <div class="row"><button id="settings-back" class="ghost">返回</button></div>
 </section>
+</main>
+
+<!-- ── 通用對話框（取代 alert／confirm） ─────────────────────── -->
+<div id="app-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title">
+  <div class="dialog-card"></div>
+</div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
 
 <!-- ── 第一次開啟：詢問是否啟用顯示卡加速 ─────────────────── -->
-<div id="gpu-dialog" class="gpu-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="gpu-dialog-title">
-  <div class="gpu-dialog-card">
+<div id="gpu-dialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="gpu-dialog-title">
+  <div class="dialog-card">
     <div class="tour-step">偵測到 NVIDIA 顯示卡</div>
     <h3 id="gpu-dialog-title">要使用顯示卡加速嗎？</h3>
     <div id="gpu-dialog-body"></div>
@@ -420,7 +535,7 @@
 </div>
 
 <!-- ── 第一次使用導覽 ─────────────────────────────────────── -->
-<div id="tour" class="tour hidden">
+<div id="tour" class="tour hidden" role="dialog" aria-modal="true" aria-labelledby="tour-title">
   <!-- 四塊遮罩圍出中間的洞。不用超大 box-shadow 挖洞：那個陰影矩形
        接近 20000x20000，Chrome 在合成層上會處理成整片塗滿，框內也一起
        變暗，Safari 則正常——同一份 CSS 兩個瀏覽器結果不同。 -->

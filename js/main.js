@@ -1,12 +1,17 @@
 // main.js — 畫面狀態機與流程串接。
-// 曲庫 → 分析 → 譜面確認 → 演唱 → 結算，另有延遲校準與設定。
+// 曲庫（含背景處理中的歌）→ 譜面確認 → 演唱 → 結算，另有延遲校準與設定。
+//
+// 所有畫面切換都經過 show()：離開一個畫面時由 leaveScreen() 統一收尾
+// （停播放、關麥克風、存調整），而每次切換都讓 state.flowId 加一——
+// 還在等網路或解碼的非同步流程醒來時發現 flowId 變了，就知道使用者已經
+// 離開，直接放棄，不會在別的畫面突然開始播歌。
 
 import { loadParams, PARAMS, TECHNIQUE_LABELS, techniqueColor, detectTechniques } from './techniques.js';
 import { framesToNotes, prepareFrames, toMono } from './dsp.js';
 import * as store from './storage.js';
 import { KeyPlayer } from './pitchshift.js';
 import { MicTracker, listDevices } from './mic.js';
-import { LatencyCalibrator, isReliable, persist as persistLatency } from './calibrate.js';
+import { LatencyCalibrator, isReliable, persist as persistLatency, latencyFor } from './calibrate.js';
 import { LiveScorer } from './score.js';
 import { StageRenderer, techniquesByNote, drawTechniqueGlyph, TECHNIQUE_PRIORITY } from './render.js';
 import * as result from './result.js';
@@ -17,9 +22,8 @@ import * as api from './api.js';
 import { Tour } from './tour.js';
 import { LyricsView, describeLyrics } from './lyrics.js';
 import { applyTheme, onThemeChange } from './theme.js';
-
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+import { $, $$, escapeHtml, fmtTime, setupCanvas, normalize, isMac, setToggle } from './util.js';
+import { alertBox, confirmBox, toast, icon, trapFocus } from './ui.js';
 
 const state = {
   ctx: null,
@@ -27,30 +31,48 @@ const state = {
   mic: null,
   scorer: null,
   renderer: null,
-  song: null,          // 目前選中的歌（IndexedDB 紀錄）
+  screen: null,
+  returnTo: 'library',  // 設定／校準／連線頁按「返回」回到哪裡
+  flowId: 0,
+  song: null,          // 目前演唱的歌
   chart: null,         // 目前使用的參考譜
   pendingSong: null,   // 譜面確認中的歌
+  allSongs: [],        // 整份曲庫清單（搜尋與排序都在前端做）
+  libraryError: null,
+  sort: 'added',
+  jobs: new Map(),     // 伺服器上的處理工作（jobId → 狀態）
+  uploads: new Map(),  // 上傳中的檔案（本機編號 → {name, pct}）
   keyShift: 0,
   latencyMs: 0,
   manualLatencyMs: 0,
   silenceRms: 0.008,
   guideOn: false,
+  backingVol: 0.9,
+  guideVol: 0.75,
   serverInfo: null,
-  tunnel: null,
+  profiles: [],        // 延遲設定檔（伺服器上）
+  micDeviceId: null,   // 使用者在校準頁選的麥克風
   outputLabel: '預設輸出',
+  sinkId: '',
+  tunnel: null,
   raf: null,
   singing: false,
+  singPhase: 'idle',   // idle | prep | countdown | playing | paused | done
+  singFrom: 'library',
   finished: false,
+  wakeLock: null,
   previewPlayer: null,
   previewChart: null,
   previewRaf: null,
   previewDragging: false,
+  chartDirty: false,   // 譜面頁的滑桿動過、還沒存
   // 譜面編輯：edits 是目前生效的編輯（逐幀音高位移 + note 覆寫）
   edits: { pitchShifts: [], notes: null },
   editor: null,
   editPiano: null,
   editPlayer: null,
   editRaf: null,
+  editDirty: false,
   // 譜面確認畫面的 A/B 試聽：原唱與鋼琴各自可開關
   previewPiano: null,
   pianoOn: false,
@@ -63,38 +85,91 @@ const state = {
   previewLyrics: null,
   previewLyricsView: null,
   lyricsPrefs: { ruby: true, romaji: false, karaoke: true, show: true },
+  compareZoom: 40,
+  tourPending: false,
 };
 
-// ── 基礎 ────────────────────────────────────────────────────
+// ── 畫面切換與生命週期 ───────────────────────────────────────
 
-// 曲庫／分析中／譜面確認／演唱／結算都屬於同一條「曲庫」動線，
+// 曲庫／譜面確認／編輯／演唱／結算都屬於同一條「曲庫」動線，
 // 手機底部導覽列與桌面頂列的按鈕都用這張表決定該亮哪一個。
 const NAV_GROUP = {
-  library: 'library', analyze: 'library', chart: 'library',
+  library: 'library', chart: 'library', edit: 'library',
   sing: 'library', result: 'library',
   calibrate: 'calibrate', settings: 'settings', connect: 'connect',
 };
+const SIDE_SCREENS = new Set(['calibrate', 'settings', 'connect']);
 
 function show(name) {
+  const prev = state.screen;
+  if (prev && prev !== name) leaveScreen(prev, name);
+  if (SIDE_SCREENS.has(name) && !SIDE_SCREENS.has(prev)) {
+    state.returnTo = prev === 'chart' && state.pendingSong ? 'chart' : 'library';
+  }
+  state.flowId += 1;
+  state.screen = name;
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === `screen-${name}`));
   // 演唱／結算畫面整頁換成螢幕的深藍（見 css 的 body[data-screen]）
   document.body.dataset.screen = name;
   const group = NAV_GROUP[name];
   $$('button[data-goto]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.goto === group);
+    const on = btn.dataset.goto === group;
+    btn.classList.toggle('active', on);
+    if (on) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
   });
   window.scrollTo(0, 0);
+  if (name === 'library' && state.tourPending) {
+    state.tourPending = false;
+    setTimeout(() => maybeStartTour(), 400);
+  }
+}
+
+/** 離開一個畫面時要收的東西都在這裡，不管是從哪個按鈕離開的。 */
+function leaveScreen(prev) {
+  if (prev === 'chart') {
+    stopPreview();
+    if (state.chartDirty) saveChartSliders().catch(() => {});
+  } else if (prev === 'edit') {
+    closeEditScreen();
+  } else if (prev === 'sing') {
+    abortSing();
+  } else if (prev === 'calibrate') {
+    if (!state.calibrating) releaseMic();
+  } else if (prev === 'settings') {
+    stopMicTest();
+  }
+}
+
+/** 非同步流程用：從開始到現在，使用者有沒有切換過畫面。 */
+const alive = (flow) => flow === state.flowId;
+
+/** 設定／校準／連線頁的「返回」：回到進來之前的地方。 */
+function goBack() {
+  if (state.returnTo === 'chart' && state.pendingSong) openChartScreen(state.pendingSong);
+  else goLibrary();
+}
+
+function goLibrary() {
+  show('library');
+  refreshLibrary();
 }
 
 async function audioCtx() {
-  if (!state.ctx) state.ctx = new (window.AudioContext || window.webkitAudioContext)();
-  if (state.ctx.state === 'suspended') await state.ctx.resume();
+  if (!state.ctx) {
+    state.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (state.sinkId && state.ctx.setSinkId) state.ctx.setSinkId(state.sinkId).catch(() => {});
+    // 來電、拔耳機、其他 App 搶走音訊時 context 會被暫停：演唱中就跟著暫停，
+    // 不要讓伴奏停了計分卻繼續跑
+    state.ctx.addEventListener('statechange', () => {
+      if (state.singPhase === 'playing' && state.ctx.state !== 'running') {
+        pauseSinging('音訊被系統中斷（例如來電或切換音訊裝置），已暫停');
+      }
+    });
+  }
+  if (state.ctx.state !== 'running') {
+    try { await state.ctx.resume(); } catch { /* 下一次使用者操作時再試 */ }
+  }
   return state.ctx;
-}
-
-function fmtDuration(ms) {
-  const s = Math.round(ms / 1000);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 function keyLabel(n) {
@@ -102,17 +177,64 @@ function keyLabel(n) {
   return n > 0 ? `♯${n}` : `♭${-n}`;
 }
 
+// ── 麥克風 ──────────────────────────────────────────────────
+//
+// 只在需要時開（演唱、校準、設定頁測試），離開那個畫面就關掉，
+// 瀏覽器的錄音指示燈才不會一直亮著。
+
+function micErrorText(err) {
+  if (!window.isSecureContext) {
+    return '這個網址不是 https，瀏覽器不會給網頁麥克風。'
+      + '手機請改用「手機連線」頁上的 https 網址或公開網址；這台電腦請用 http://localhost。';
+  }
+  if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
+    return '麥克風權限被拒絕了。請在瀏覽器網址列旁的權限設定裡允許麥克風，再重新整理。';
+  }
+  if (err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError') {
+    return '找不到麥克風。請確認麥克風已接上，或到「延遲校準」頁換一個。';
+  }
+  if (err?.name === 'NotReadableError') {
+    return '麥克風被其他程式占用中（例如視訊會議軟體），請先關掉它再試。';
+  }
+  return `無法使用麥克風：${err?.message || err}`;
+}
+
+async function ensureMic(deviceId = state.micDeviceId) {
+  const ctx = await audioCtx();
+  if (state.mic?.running && (!deviceId || state.mic.deviceId === deviceId)) return state.mic;
+  releaseMic();
+  const make = () => new MicTracker(ctx, {
+    silenceRms: state.silenceRms,
+    minConfidence: PARAMS.pitch.minConfidence,
+  });
+  let mic = make();
+  try {
+    await mic.start(deviceId || null);
+  } catch (err) {
+    // 記住的那支麥克風不見了（拔掉了）：退回預設的
+    if (deviceId && (err?.name === 'OverconstrainedError' || err?.name === 'NotFoundError')) {
+      mic = make();
+      try { await mic.start(null); } catch (err2) { throw new Error(micErrorText(err2)); }
+    } else {
+      throw new Error(micErrorText(err));
+    }
+  }
+  mic.onEnded = () => {
+    if (state.singPhase === 'playing') pauseSinging('麥克風斷線了（拔掉或藍牙中斷），已暫停');
+  };
+  state.mic = mic;
+  return mic;
+}
+
+function releaseMic() {
+  state.mic?.stop();
+  state.mic = null;
+}
+
 // ── 曲庫 ────────────────────────────────────────────────────
 //
 // 曲庫本體（音檔、譜面）存在跑伺服器的那台電腦上。這個畫面只拿中繼資料，
 // 音軌要等使用者按下「演唱」或「譜面」才會抓到這台裝置上。
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-// ── 封面 ────────────────────────────────────────────────────
 
 /** 沒有封面時的預設封面：依歌名決定色相，同一首歌每次都同一個顏色。 */
 function coverPlaceholder(song) {
@@ -123,8 +245,8 @@ function coverPlaceholder(song) {
   return `<div class="cover-ph" style="--h:${h}"><b>${escapeHtml(first)}</b><i>♪</i></div>`;
 }
 
-function coverHtml(song) {
-  const url = api.coverUrl(song);
+function coverHtml(song, thumb = false) {
+  const url = thumb ? api.thumbUrl(song) : api.coverUrl(song);
   return url
     ? `<img class="cover-img" src="${url}" alt="" loading="lazy" decoding="async">`
     : coverPlaceholder(song);
@@ -145,66 +267,110 @@ function setCover(el, song) {
 
 /** 演唱／結算畫面的背景：封面放大模糊。沒有封面就只留深藍底。 */
 function setBackdrop(el, song) {
-  const url = api.coverUrl(song);
+  const url = api.thumbUrl(song);   // 反正要模糊，用小圖就好
   el.classList.toggle('show', !!url);
   el.innerHTML = url ? `<img src="${url}" alt="">` : '';
 }
 
-function songCard(song, best, matched = false) {
+function songCard(song, matched = false) {
   const tags = [
     song.source ? `<span class="source">${escapeHtml(song.source)}</span>` : '',
-    song.lyrics ? '<span class="lyr-tag" title="有歌詞">♪ 歌詞</span>' : '',
+    song.lyrics ? '<span class="lyr-tag">♪ 歌詞</span>' : '',
   ].join('');
+  const artist = song.artist || song.uploader;
+  const plays = song.plays ? `・唱過 ${song.plays} 次` : '';
+  const canDelete = !state.serverInfo?.public;
   return `
     <div class="song-card${matched ? ' matched' : ''}" data-id="${escapeHtml(song.id)}">
-      <button class="cover" data-act="sing" title="演唱" data-cover-name="${escapeHtml(song.name)}">
-        ${coverHtml(song)}
-        <span class="play">演唱</span>
-        ${best ? `<span class="best-badge">${best.total.toFixed(1)}</span>` : ''}
+      <button class="cover" data-act="sing" aria-label="演唱「${escapeHtml(song.name)}」" data-cover-name="${escapeHtml(song.name)}">
+        ${coverHtml(song, true)}
+        <span class="play" aria-hidden="true">${icon('play')}</span>
+        ${song.best != null ? `<span class="best-badge" title="個人最佳">${icon('star')}${Number(song.best).toFixed(1)}</span>` : ''}
       </button>
+      <button class="fav-btn${song.favorite ? ' on' : ''}" data-act="fav" aria-pressed="${song.favorite ? 'true' : 'false'}"
+        aria-label="${song.favorite ? '從最愛移除' : '加入最愛'}">${icon('star')}</button>
       <div class="info">
         <div class="name" title="${escapeHtml(song.name)}">${escapeHtml(song.name)}</div>
-        ${song.artist || song.uploader
-    ? `<button class="artist" data-artist="${escapeHtml(song.artist || song.uploader)}" title="列出這位歌手的歌">${escapeHtml(song.artist || song.uploader)}</button>`
-    : ''}
+        ${artist ? `<button class="artist" data-artist="${escapeHtml(artist)}" title="列出這位歌手的歌">${escapeHtml(artist)}</button>` : ''}
         ${tags ? `<div class="tags">${tags}</div>` : ''}
-        <div class="meta">${fmtDuration(song.durationMs)}・${song.notes} 音</div>
+        <div class="meta">${fmtTime(song.durationMs)}${plays}</div>
       </div>
       <div class="row">
         <button class="primary tiny" data-act="sing">演唱</button>
         <button class="ghost tiny" data-act="chart">譜面</button>
-        <button class="ghost tiny danger icon" data-act="del" title="刪除">✕</button>
+        ${canDelete ? `<button class="ghost tiny icon-only card-del" data-act="del" aria-label="刪除「${escapeHtml(song.name)}」">${icon('trash')}</button>` : ''}
       </div>
     </div>`;
 }
 
-async function renderLibrary(query = '', matchedId = null) {
-  const list = $('#song-list');
-  let songs;
+/** 搜尋框目前的關鍵字（網址不算關鍵字）。 */
+function currentQuery() {
+  const v = $('#search-input').value.trim();
+  return isSupportedUrl(v) ? '' : v;
+}
+
+function filterSongs(songs, query) {
+  const words = query.split(/\s+/).map(normalize).filter(Boolean);
+  if (!words.length) return songs;
+  return songs.filter((m) => {
+    const hay = [m.name, m.artist, m.uploader].map(normalize).join(' ');
+    return words.every((w) => hay.includes(w));
+  });
+}
+
+const SORTERS = {
+  added: (a, b) => (b.addedAt || 0) - (a.addedAt || 0),
+  recent: (a, b) => (b.lastSungAt || 0) - (a.lastSungAt || 0) || SORTERS.added(a, b),
+  name: (a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hant'),
+  best: (a, b) => (b.best ?? -1) - (a.best ?? -1) || SORTERS.added(a, b),
+  fav: (a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0) || SORTERS.added(a, b),
+};
+
+/** 從伺服器重新拿清單再畫。 */
+async function refreshLibrary(matchedId = null) {
   try {
-    songs = await api.listSongs(query);
+    state.allSongs = await api.listSongs();
+    state.libraryError = null;
   } catch (err) {
-    list.innerHTML = `<p class="muted">連不上伺服器：${escapeHtml(err.message)}</p>`;
+    state.libraryError = err.message;
+  }
+  renderLibrary(matchedId);
+}
+
+/** 用手上的清單畫（搜尋框打字時走這裡，不必問伺服器）。 */
+function renderLibrary(matchedId = null) {
+  const list = $('#song-list');
+  const query = currentQuery();
+  renderArtistBar(query);
+
+  if (state.libraryError && !state.allSongs.length) {
+    list.innerHTML = `<div class="empty-state">${icon('warn', 'big')}
+      <p>連不上這台電腦的伺服器：${escapeHtml(state.libraryError)}</p>
+      <button class="ghost" data-act="retry">再試一次</button></div>`;
+    $('#library-count').textContent = '';
     return;
   }
-  state.songs = songs;
-  $('#library-count').textContent = songs.length ? `${songs.length} 首` : '';
-  renderArtistBar(query);
+
+  const songs = filterSongs(state.allSongs, query).sort(SORTERS[state.sort] || SORTERS.added);
+  $('#library-count').textContent = state.allSongs.length
+    ? (query ? `${songs.length} / ${state.allSongs.length} 首` : `${state.allSongs.length} 首`) : '';
 
   if (!songs.length) {
     list.innerHTML = query
-      ? `<p class="muted">曲庫裡沒有符合「${escapeHtml(query)}」的歌。<br>
-         想加新歌就貼上 YouTube／YouTube Music／Bilibili 的網址，或按右邊的 ＋ 上傳本機音檔。</p>`
-      : '<p class="muted">曲庫還是空的。<br>貼上 YouTube／YouTube Music／Bilibili 的網址，或按右邊的 ＋ 上傳本機音檔。</p>';
+      ? `<div class="empty-state">${icon('search', 'big')}
+          <p>曲庫裡沒有符合「${escapeHtml(query)}」的歌。</p>
+          <p class="muted small">想加新歌就貼上 YouTube／YouTube Music／Bilibili 的網址，或按右上的 ＋ 上傳本機音檔。</p></div>`
+      : `<div class="empty-state">${icon('library', 'big')}
+          <h3>曲庫還是空的</h3>
+          <p class="muted">把 YouTube／YouTube Music／Bilibili 的網址貼到上面的搜尋列按 Enter，
+          或按 ＋ 上傳音檔。程式會自動分出伴奏、做好音程譜與歌詞。</p>
+          <button class="primary" data-act="focus-search">貼上網址加第一首歌</button></div>`;
     return;
   }
 
-  const cards = await Promise.all(songs.map(async (song) =>
-    songCard(song, await store.bestScore(song.id), song.id === matchedId)));
-  list.innerHTML = cards.join('');
-
+  list.innerHTML = songs.map((song) => songCard(song, song.id === matchedId)).join('');
   if (matchedId) {
-    $(`.song-card[data-id="${matchedId}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    $(`.song-card[data-id="${CSS.escape(matchedId)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
 }
 
@@ -227,7 +393,7 @@ function renderArtistBar(query) {
   bar.classList.toggle('hidden', !list.length);
   const q = (query || '').trim();
   bar.innerHTML = list.map((a) =>
-    `<button class="chip${a.name === q ? ' on' : ''}" data-artist="${escapeHtml(a.name)}">`
+    `<button class="chip${a.name === q ? ' on' : ''}" data-artist="${escapeHtml(a.name)}" aria-pressed="${a.name === q}">`
     + `${escapeHtml(a.name)}<small>${a.count}</small></button>`).join('');
 }
 
@@ -236,23 +402,46 @@ $('#artist-bar').addEventListener('click', (e) => {
   if (btn) searchArtist(btn.dataset.artist);
 });
 
+$('#sort-select').addEventListener('change', (e) => {
+  state.sort = e.target.value;
+  store.setSetting('librarySort', state.sort);
+  renderLibrary();
+});
+
 $('#song-list').addEventListener('click', async (e) => {
   const artistBtn = e.target.closest('button[data-artist]');
   if (artistBtn) { searchArtist(artistBtn.dataset.artist); return; }
-  const btn = e.target.closest('button[data-act]');
+  const btn = e.target.closest('[data-act]');
   if (!btn) return;
-  const id = btn.closest('.song-card').dataset.id;
-  const song = state.songs.find((s) => s.id === id);
+  if (btn.dataset.act === 'retry') { refreshLibrary(); return; }
+  if (btn.dataset.act === 'focus-search') { $('#search-input').focus(); return; }
+  const id = btn.closest('.song-card')?.dataset.id;
+  const song = state.allSongs.find((s) => s.id === id);
   if (!song) return;
 
   if (btn.dataset.act === 'del') {
-    if (!confirm(`刪除「${song.name}」？這會從電腦上移除音檔，成績紀錄也會一起清掉。`)) return;
-    await api.deleteSong(id);
-    renderLibrary($('#search-input').value.trim());
+    const ok = await confirmBox(`這會從電腦上移除「${song.name}」的音檔、譜面與所有成績紀錄，不能復原。`,
+      { title: '刪除這首歌？', ok: '刪除', danger: true });
+    if (!ok) return;
+    try {
+      await api.deleteSong(id);
+      toast(`已刪除「${song.name}」`);
+    } catch (err) {
+      toast(`刪除失敗：${err.message}`, { kind: 'error' });
+    }
+    refreshLibrary();
+  } else if (btn.dataset.act === 'fav') {
+    song.favorite = !song.favorite;
+    renderLibrary();
+    api.saveSongSettings(id, { favorite: song.favorite }).catch((err) => {
+      song.favorite = !song.favorite;
+      renderLibrary();
+      toast(`存不了最愛：${err.message}`, { kind: 'error' });
+    });
   } else if (btn.dataset.act === 'chart') {
     openChartScreen(id);
   } else {
-    startSinging(id);
+    startSinging(id, { from: 'library' });
   }
 });
 
@@ -287,7 +476,7 @@ searchInput.addEventListener('input', () => {
     return;
   }
   setSearchStatus('');
-  searchTimer = setTimeout(() => renderLibrary(value), 180);
+  searchTimer = setTimeout(() => renderLibrary(), 120);
 });
 
 searchInput.addEventListener('keydown', (e) => {
@@ -313,7 +502,12 @@ function isSupportedUrl(text) {
   } catch { return false; }
 }
 
-/** 貼上網址：先問是不是已經有了，有就標出來，沒有才下載。 */
+function clearSearch() {
+  searchInput.value = '';
+  $('#search-clear').classList.add('hidden');
+}
+
+/** 貼上網址：先問是不是已經有了，有就標出來，沒有就排進背景處理。 */
 async function handleUrl(url) {
   setSearchStatus('<span class="spinner"></span><span class="grow">讀取網址中…</span>');
   let resolved;
@@ -330,29 +524,30 @@ async function handleUrl(url) {
     // 這首已經下載過了——把它當成搜尋結果顯示出來
     setSearchStatus(
       `<span class="grow"><strong>${escapeHtml(existing.name)}</strong> 已經在曲庫裡了</span>`);
-    searchInput.value = '';
-    $('#search-clear').classList.add('hidden');
-    await renderLibrary('', existing.id);
+    clearSearch();
+    await refreshLibrary(existing.id);
     return;
   }
 
-  setSearchStatus(
-    `<span class="spinner"></span><span class="grow">從 ${escapeHtml(meta.platformLabel)} 取得
-     <strong>${escapeHtml(meta.title)}</strong>…</span>`);
-
   try {
+    // 伺服器會沿用剛才 resolve 的結果，不會再問一次 yt-dlp
     const job = await api.fetchUrl(url);
-    if (job.existing) { await renderLibrary('', job.existing.id); return; }
-    searchInput.value = '';
-    $('#search-clear').classList.add('hidden');
+    if (job.existing) { clearSearch(); setSearchStatus(''); await refreshLibrary(job.existing.id); return; }
+    clearSearch();
     setSearchStatus('');
-    await runJob(job.jobId, meta.title);
+    addJob({ jobId: job.jobId, name: meta.title, state: 'queued', pct: 0, stage: 'download',
+             source: 'url', message: '排隊中…' });
+    toast(`「${meta.title}」已加入處理清單，處理期間可以先唱別首`);
   } catch (err) {
     setSearchStatus(`取得失敗：${escapeHtml(err.message)}`, 'error');
   }
 }
 
-// ── 上傳與分析 ──────────────────────────────────────────────
+// ── 加歌：上傳與背景處理 ─────────────────────────────────────
+//
+// 分離＋抽音高要 1～3 分鐘。以前整個介面會被鎖在分析畫面；現在工作在
+// 伺服器上排隊，曲庫最上面顯示進度卡，可以先唱別首、連續排好幾首、
+// 重新整理後也接得回來（進度存在伺服器，不在這個頁面）。
 
 const dropzone = $('#dropzone');
 dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('over'); });
@@ -360,67 +555,166 @@ dropzone.addEventListener('dragleave', () => dropzone.classList.remove('over'));
 dropzone.addEventListener('drop', (e) => {
   e.preventDefault();
   dropzone.classList.remove('over');
-  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  for (const f of e.dataTransfer.files) handleFile(f);
 });
 $('#upload-btn').addEventListener('click', () => $('#file-input').click());
 $('#file-input').addEventListener('change', (e) => {
-  if (e.target.files[0]) handleFile(e.target.files[0]);
+  for (const f of e.target.files) handleFile(f);
   e.target.value = '';
 });
 
-function setStage(name) {
-  $$('.stages li').forEach((li) => {
-    const order = ['separate', 'pitch', 'technique'];
-    const idx = order.indexOf(li.dataset.stage);
-    const cur = order.indexOf(name);
-    li.classList.toggle('done', idx < cur);
-    li.classList.toggle('active', idx === cur);
-  });
-}
+const STAGE_LABEL = {
+  download: '下載音訊', separate: '音源分離（人聲／伴奏）', pitch: '抽取原唱音高', technique: '標記原唱技巧',
+};
 
-function setProgress(pct, message) {
-  $('#analyze-bar').style.width = `${Math.round(pct * 100)}%`;
-  if (message) $('#analyze-message').textContent = message;
-}
-
-/** 追蹤一件伺服器工作（下載／分析），完成後直接進譜面確認。 */
-async function runJob(jobId, title) {
-  $('#analyze-title').textContent = title;
-  setProgress(0, '排隊中…');
-  setStage('separate');
-  show('analyze');
-
-  try {
-    const job = await api.trackJob(jobId, (j) => {
-      setProgress(j.pct, j.message);
-      if (j.name) $('#analyze-title').textContent = j.name;
-      if (j.pct < 0.62) setStage('separate');
-      else if (j.pct < 0.92) setStage('pitch');
-      else setStage('technique');
-    });
-    await renderLibrary($('#search-input').value.trim());
-    openChartScreen(job.songId);
-  } catch (err) {
-    alert(`處理失敗：${err.message || err}`);
-    show('library');
-    renderLibrary();
-  }
-}
-
+let uploadSeq = 0;
 async function handleFile(file) {
+  if (file.size > 200 * 1024 * 1024) {
+    toast(`「${file.name}」超過 200MB，太大了`, { kind: 'error' });
+    return;
+  }
+  const localId = `u${++uploadSeq}`;
+  state.uploads.set(localId, { name: file.name, pct: 0 });
+  renderJobs();
   try {
-    const job = await api.uploadFile(file);
-    await runJob(job.jobId, file.name);
+    const job = await api.uploadFile(file, (pct) => {
+      const u = state.uploads.get(localId);
+      if (u) { u.pct = pct; renderJobs(); }
+    });
+    state.uploads.delete(localId);
+    addJob({ jobId: job.jobId, name: job.name || file.name, state: 'queued', pct: 0,
+             stage: 'separate', source: 'upload', message: '排隊中…' });
   } catch (err) {
-    alert(`上傳失敗：${err.message || err}`);
-    show('library');
+    state.uploads.delete(localId);
+    renderJobs();
+    toast(`上傳「${file.name}」失敗：${err.message}`, { kind: 'error', duration: 8000 });
   }
 }
+
+function addJob(job) {
+  job.seen = true;   // 這個頁面看過它在跑：完成時才通知
+  state.jobs.set(job.jobId, job);
+  renderJobs();
+  pollJobs();
+}
+
+let jobTimer = null;
+/** 有進行中的工作就每秒問一次伺服器（重新整理後也從這裡接回來）。 */
+async function pollJobs() {
+  clearTimeout(jobTimer);
+  let list;
+  try {
+    list = await api.listJobs();
+  } catch {
+    jobTimer = setTimeout(pollJobs, 3000);
+    return;
+  }
+  const byId = new Map(list.map((j) => [j.jobId, j]));
+  for (const j of list) {
+    const old = state.jobs.get(j.jobId);
+    const active = j.state === 'queued' || j.state === 'running';
+    if (!old && !active) continue;   // 這個頁面沒看過、已經結束的：不打擾
+    const merged = { ...old, ...j, seen: true };
+    state.jobs.set(j.jobId, merged);
+    if (!active && old && (old.state === 'queued' || old.state === 'running')) onJobFinished(merged);
+  }
+  // 伺服器那邊已經清掉的（重新啟動過）
+  for (const [id, j] of state.jobs) {
+    if (!byId.has(id) && (j.state === 'queued' || j.state === 'running')) {
+      state.jobs.delete(id);
+    }
+  }
+  renderJobs();
+  if ([...state.jobs.values()].some((j) => j.state === 'queued' || j.state === 'running')) {
+    jobTimer = setTimeout(pollJobs, 1000);
+  }
+}
+
+function onJobFinished(job) {
+  if (job.state === 'done') {
+    state.jobs.delete(job.jobId);
+    refreshLibrary(job.songId);
+    toast(`「${job.name}」處理完成`, {
+      kind: 'ok', duration: 10000,
+      action: { label: '看譜面', run: () => openChartScreen(job.songId) },
+    });
+  } else if (job.state === 'cancelled') {
+    state.jobs.delete(job.jobId);
+  }
+  // error 留在清單上顯示原因，使用者按 ✕ 才收掉
+}
+
+function renderJobs() {
+  const host = $('#job-list');
+  const uploads = [...state.uploads.values()].map((u) => `
+    <div class="job-card">
+      <div class="job-main">
+        <div class="job-name">${escapeHtml(u.name)}</div>
+        <div class="job-msg">上傳中 ${Math.round(u.pct * 100)}%</div>
+        <div class="progress"><div class="progress-bar" style="width:${Math.round(u.pct * 100)}%"></div></div>
+      </div>
+    </div>`);
+  const jobs = [...state.jobs.values()].map((j) => {
+    const failed = j.state === 'error';
+    const pct = Math.round((j.pct || 0) * 100);
+    const stage = j.state === 'queued' ? '排隊中' : STAGE_LABEL[j.stage] || '處理中';
+    return `
+    <div class="job-card${failed ? ' failed' : ''}" data-job="${escapeHtml(j.jobId)}">
+      <div class="job-main">
+        <div class="job-name">${escapeHtml(j.name || '未命名')}</div>
+        <div class="job-msg">${failed ? `${icon('warn')} 處理失敗：${escapeHtml(j.message)}`
+          : `<strong>${escapeHtml(stage)}</strong>・${escapeHtml(j.message || '')}`}</div>
+        ${failed ? '' : `<div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div>`}
+      </div>
+      <button class="ghost tiny icon-only" data-job-act="${failed ? 'dismiss' : 'cancel'}"
+        aria-label="${failed ? '關閉' : '取消處理'}" title="${failed ? '關閉' : '取消'}">${icon('close')}</button>
+    </div>`;
+  });
+  host.innerHTML = [...uploads, ...jobs].join('');
+}
+
+$('#job-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-job-act]');
+  if (!btn) return;
+  const id = btn.closest('[data-job]').dataset.job;
+  const job = state.jobs.get(id);
+  if (btn.dataset.jobAct === 'dismiss') {
+    state.jobs.delete(id);
+    renderJobs();
+    return;
+  }
+  const ok = await confirmBox(`不處理「${job?.name || '這首歌'}」了嗎？`, { ok: '取消處理', cancel: '繼續處理' });
+  if (!ok) return;
+  try {
+    await api.cancelJob(id);
+  } catch (err) {
+    toast(`取消失敗：${err.message}`, { kind: 'error' });
+  }
+  pollJobs();
+});
 
 // ── 譜面確認 ────────────────────────────────────────────────
 
 async function openChartScreen(idOrSong) {
-  const song = typeof idOrSong === 'string' ? await loadSong(idOrSong) : idOrSong;
+  show('chart');
+  const flow = state.flowId;
+  const known = typeof idOrSong === 'string' ? state.allSongs.find((s) => s.id === idOrSong) : idOrSong;
+  $('#chart-song-name').textContent = known?.name || '讀取中…';
+  $('#chart-stats').textContent = '';
+  $('#preview-play').disabled = true;
+  if (known) setCover($('#chart-cover'), known);
+
+  let song;
+  try {
+    song = typeof idOrSong === 'string' ? await loadSong(idOrSong) : idOrSong;
+  } catch (err) {
+    if (!alive(flow)) return;
+    toast(`讀取譜面失敗：${err.message}`, { kind: 'error' });
+    goLibrary();
+    return;
+  }
+  if (!alive(flow)) return;
+
   state.pendingSong = song;
   $('#chart-song-name').textContent = song.name;
   setCover($('#chart-cover'), song);
@@ -429,15 +723,82 @@ async function openChartScreen(idOrSong) {
   $('#sens-slider').value = song.minConfidence ?? PARAMS.pitch.minConfidence;
   $('#level-slider').value = song.minLevelDb ?? PARAMS.pitch.minLevelDb;
   state.edits = normalizeEdits(song.chartEdits);
-  show('chart');
+  state.chartDirty = false;
+  updateAdvancedLock();
   // 直接畫，不要透過 requestAnimationFrame——分頁在背景時 rAF 不會觸發，
   // 一次性的繪製會整個消失
   refreshChartPreview();
   loadChartLyrics(song);
-  await preparePreviewPlayer(song);
+  await preparePreviewPlayer(song, flow);
 }
 
-/** 譜面畫面的試聽播放器。用人聲軌（簡易模式沒有的話就用原曲）。 */
+/** 手動編輯過譜面之後，「進階」的三個滑桿就不再有作用：灰掉並說明。 */
+function updateAdvancedLock() {
+  const locked = !!state.edits.notes;
+  $('#advanced-locked').classList.toggle('hidden', !locked);
+  $$('#advanced-controls input').forEach((el) => { el.disabled = locked; });
+}
+
+/** 把譜面頁滑桿的值存回伺服器（離開畫面時自動存，不必另外按）。 */
+async function saveChartSliders() {
+  const song = state.pendingSong;
+  if (!song || !state.chartDirty) return;
+  state.chartDirty = false;
+  song.octaveOffset = Number($('#octave-slider').value);
+  song.minConfidence = Number($('#sens-slider').value);
+  song.minLevelDb = Number($('#level-slider').value);
+  try {
+    await api.saveSongSettings(song.id, {
+      octaveOffset: song.octaveOffset,
+      minConfidence: song.minConfidence,
+      minLevelDb: song.minLevelDb,
+    });
+  } catch (err) {
+    toast(`譜面調整沒有存成功：${err.message}`, { kind: 'error' });
+    throw err;
+  }
+}
+
+// ── 解碼後音軌的快取 ─────────────────────────────────────────
+//
+// 譜面 → 編輯 → 存檔 → 演唱 → 再唱一次，用的都是同一組音軌。以前每一步
+// 都重新抓（至少一趟 304）再整份重新解碼，四分鐘的歌每次要一兩秒。
+// 這裡依「歌曲＋音軌＋版本」記住解碼結果，只留最近幾份（手機記憶體有限）。
+
+const decoded = new Map();      // key → Promise<AudioBuffer>
+const stemChecked = new Map();  // `${id}:${kind}` → { etag, at }
+const DECODED_LIMIT = 3;
+const STEM_RECHECK_MS = 5 * 60 * 1000;
+
+async function getDecoded(song, kind, ctx, onProgress = null, mono = false) {
+  const base = `${song.id}:${kind}`;
+  const recent = stemChecked.get(base);
+  let key = recent ? `${base}:${recent.etag}:${mono ? 'm' : 's'}` : null;
+  // 剛確認過版本的就不必再問伺服器
+  if (key && decoded.has(key) && Date.now() - recent.at < STEM_RECHECK_MS) {
+    const p = decoded.get(key);
+    decoded.delete(key); decoded.set(key, p);   // 移到最新
+    onProgress?.(1, 1, true);
+    return p;
+  }
+  const { blob, etag } = await api.getStem(song.id, kind, onProgress);
+  stemChecked.set(base, { etag, at: Date.now() });
+  key = `${base}:${etag}:${mono ? 'm' : 's'}`;
+  if (decoded.has(key)) {
+    const p = decoded.get(key);
+    decoded.delete(key); decoded.set(key, p);
+    return p;
+  }
+  const p = (async () => {
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+    return mono ? monoBuffer(ctx, buf) : buf;
+  })();
+  decoded.set(key, p);
+  p.catch(() => decoded.delete(key));
+  while (decoded.size > DECODED_LIMIT) decoded.delete(decoded.keys().next().value);
+  return p;
+}
+
 /**
  * 取人聲軌並建一個播放器。譜面確認與編輯畫面共用。
  * @param onStatus 回報取檔進度／錯誤，讓兩個畫面各自顯示在自己的位置
@@ -449,30 +810,35 @@ async function loadPreviewAudio(song, ctx, onStatus = () => {}) {
   }
   // 音檔在伺服器上，這裡才抓下來（抓過就走本機快取）
   onStatus('取得音軌中…');
-  let blob;
+  let buffer;
   try {
-    blob = await api.getStem(song.id, 'vocals', (done, total, fromCache) => {
+    buffer = await getDecoded(song, 'vocals', ctx, (done, total, fromCache) => {
       if (!fromCache && total) onStatus(`取得音軌中… ${Math.round(done / total * 100)}%`);
-    });
+    }, true);
   } catch (err) {
     onStatus(`取得音軌失敗：${err.message}`);
     return null;
   }
-  const buffer = await ctx.decodeAudioData(await blob.arrayBuffer());
   const player = new KeyPlayer(ctx);
-  await player.load([{ buffer: monoBuffer(ctx, buffer), gain: 1 }]);
+  await player.load([{ buffer, gain: 1 }]);
   player.connect(ctx.destination);
   return player;
 }
 
-async function preparePreviewPlayer(song) {
+async function preparePreviewPlayer(song, flow = state.flowId) {
   stopPreview();
   $('#preview-play').disabled = true;
   const ctx = await audioCtx();
   const player = await loadPreviewAudio(song, ctx, (msg) => {
-    $('#preview-time').textContent = msg;
+    if (alive(flow)) $('#preview-time').textContent = msg;
   });
   if (!player) return;
+  if (!alive(flow)) {
+    // 使用者在下載期間離開了：這個播放器用不到了
+    player.node?.disconnect();
+    player.gain.disconnect();
+    return;
+  }
   $('#preview-play').disabled = false;
   player.onended = () => { setPreviewPlaying(false); drawPreviewFrame(); };
   state.previewPlayer = player;
@@ -497,6 +863,7 @@ function applyPreviewVocalGain() {
 
 function refreshChartPreview() {
   const song = state.pendingSong;
+  if (!song) return;
   const octave = Number($('#octave-slider').value);
   const minConfidence = Number($('#sens-slider').value);
   const minLevelDb = Number($('#level-slider').value);
@@ -507,8 +874,9 @@ function refreshChartPreview() {
   const chart = rebuildChart(song.chart, {
     minConfidence, minLevelDb, octaveOffset: octave, edits: state.edits,
   });
+  chart.techByNote = techniquesByNote(chart.techniques);   // 每幀重畫都要用，先算好
   state.previewChart = chart;
-  // 譜變了（滑桿或段落修正），鋼琴要跟著彈新的
+  // 譜變了，鋼琴要跟著彈新的
   state.previewPiano?.setNotes(chart.notes);
   // 逐字時間的估算靠譜面的音，譜變了就重算
   if (state.previewLyricsView) setPreviewLyrics(state.previewLyrics);
@@ -546,17 +914,6 @@ function drawPreviewFrame() {
   updatePreviewTime();
 }
 
-function fmtTime(ms) {
-  const s = Math.max(0, Math.round(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-}
-
-// -- 段落八度修正 ---------------------------------------------------------
-//
-// 自動偵測不可能完美：強聲區的二次諧波可以比基頻大好幾倍，pyin 與 CREPE
-// 都會整句鎖在諧波上。這裡讓使用者圈一段自己改，是最後的出口。
-// 預覽畫布的拖曳已經用來捲動時間軸了，所以改用播放頭設定起訖點。
-
 // ── 編輯譜面 ────────────────────────────────────────────────
 
 /** 從伺服器拿到的編輯資料可能是舊格式或缺欄位，統一成已知形狀。 */
@@ -574,9 +931,15 @@ function editStatus(text) {
 
 async function openEditScreen() {
   const song = state.pendingSong;
-  stopPreview();
-  $('#edit-song-name').textContent = song.name;
+  // 先記下譜面頁的播放位置再停掉播放器，進編輯頁才接得上剛才看到的地方
+  const resumeMs = state.previewPlayer ? previewPositionMs() : null;
+  if (state.chartDirty) saveChartSliders().catch(() => {});
   show('edit');
+  const flow = state.flowId;
+  $('#edit-song-name').textContent = song.name;
+  $('#edit-play').disabled = true;
+  $('#edit-play').textContent = '播放';
+  $('#edit-time').textContent = '載入音軌中…';
 
   const ctx = await audioCtx();
   if (!state.editor) {
@@ -585,6 +948,7 @@ async function openEditScreen() {
         // 結構性編輯一旦發生，就以這份 note 清單為準（見 chart.js 的說明）
         state.edits.notes = notes.map((n) => ({ ...n }));
         state.editPiano?.setNotes(notes);
+        state.editDirty = true;
         editStatus(`已修改，共 ${notes.length} 個音符（尚未儲存）`);
       },
       onSelect: (note) => {
@@ -608,9 +972,9 @@ async function openEditScreen() {
 
   // 進編輯器就把目前的 note 定住。滑桿是「產生」階段的參數，手動編輯之後
   // 再重新產生會把編輯洗掉，所以編輯期間以這份清單為唯一真相。
-  // 從譜面確認畫面的播放位置接續，使用者剛才看到哪就從哪開始編
-  state.editor.setNotes(state.previewChart.notes, state.previewChart.durationMs,
-    state.previewPlayer ? previewPositionMs() : null);
+  state.editor.setNotes(state.previewChart.notes, state.previewChart.durationMs, resumeMs);
+  if (resumeMs !== null) state.editor.setPlayhead(resumeMs);
+  state.editDirty = false;
   $('#edit-sel').textContent = '未選取';
   editStatus(state.edits.notes ? '這首歌已經有編輯過的譜面。' : '');
 
@@ -623,10 +987,21 @@ async function openEditScreen() {
   state.editPiano.setNotes(state.previewChart.notes);
   state.editPiano.setEnabled($('#edit-piano').classList.contains('on'));
 
-  state.editPlayer = await loadPreviewAudio(song, ctx);
-  $('#edit-play').disabled = !state.editPlayer;
-  $('#edit-time').textContent = state.editPlayer
-    ? `0:00 / ${fmtTime(state.editPlayer.duration * 1000)}` : '（沒有可試聽的音軌）';
+  const player = await loadPreviewAudio(song, ctx, (msg) => {
+    if (alive(flow)) $('#edit-time').textContent = msg;
+  });
+  if (!alive(flow)) {
+    if (player) { player.node?.disconnect(); player.gain.disconnect(); }
+    return;
+  }
+  state.editPlayer = player;
+  if (player && resumeMs !== null) player.seek(Math.min(player.duration, resumeMs / 1000));
+  $('#edit-play').disabled = !player;
+  if (player) {
+    $('#edit-time').textContent =
+      `${fmtTime((resumeMs || 0))} / ${fmtTime(player.duration * 1000)}`;
+    player.onended = () => { $('#edit-play').textContent = '播放'; };
+  }
   applyEditVocalGain();
   editLoop();
 }
@@ -638,7 +1013,7 @@ function applyEditVocalGain() {
 function editLoop() {
   cancelAnimationFrame(state.editRaf);
   const step = () => {
-    if (!$('#screen-edit').classList.contains('active')) return;
+    if (state.screen !== 'edit') return;
     if (state.editPlayer?.playing) {
       const ms = state.editPlayer.currentTime * 1000;
       state.editor.setPlayhead(ms, true);
@@ -661,21 +1036,18 @@ function closeEditScreen() {
   }
 }
 
+/** 回到譜面確認畫面（編輯存檔或取消之後）。 */
+async function backToChart() {
+  show('chart');
+  updateAdvancedLock();
+  refreshChartPreview();
+  await preparePreviewPlayer(state.pendingSong);
+}
+
 function updatePreviewTime() {
   if (!state.previewChart) return;
   $('#preview-time').textContent =
     `${fmtTime(previewPositionMs())} / ${fmtTime(state.previewChart.durationMs)}`;
-}
-
-function setupCanvas(canvas) {
-  const dpr = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = Math.max(1, Math.round(rect.width * dpr));
-  canvas.height = Math.max(1, Math.round(rect.height * dpr));
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, rect.width, rect.height);
-  return { ctx, w: rect.width, h: rect.height };
 }
 
 /** 目前這個畫布寬度可以看到多少毫秒。 */
@@ -688,14 +1060,14 @@ function drawDetailStrip(canvas, chart, playheadMs) {
   const { ctx, w, h } = setupCanvas(canvas);
   const notes = chart.notes;
   if (!notes.length) {
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
     ctx.font = '13px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('沒有偵測到旋律，試著到「進階」調低靈敏度', w / 2, h / 2);
     return;
   }
 
-  const range = noteRange(notes, 2);
+  const range = chart.range || (chart.range = noteRange(notes, 2));
   const judgeX = w * PREVIEW_JUDGE_RATIO;
   const pxPerMs = PREVIEW_PX_PER_SEC / 1000;
   const xOf = (ms) => judgeX + (ms - playheadMs) * pxPerMs;
@@ -703,7 +1075,7 @@ function drawDetailStrip(canvas, chart, playheadMs) {
   const fromMs = playheadMs - judgeX / pxPerMs;
   const toMs = fromMs + w / pxPerMs;
 
-  // 每秒一條淡刻度，整十秒標時間
+  // 每秒一條淡刻度，整五秒標時間
   ctx.font = '10px ui-monospace, monospace';
   ctx.textAlign = 'center';
   const firstSec = Math.floor(fromMs / 1000);
@@ -717,7 +1089,7 @@ function drawDetailStrip(canvas, chart, playheadMs) {
     ctx.lineTo(x, h - (major ? 14 : 8));
     ctx.stroke();
     if (major) {
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
       ctx.fillText(fmtTime(sec * 1000), x, h - 3);
     }
   }
@@ -732,23 +1104,24 @@ function drawDetailStrip(canvas, chart, playheadMs) {
     ctx.moveTo(0, y);
     ctx.lineTo(w, y);
     ctx.stroke();
-    ctx.fillStyle = 'rgba(0,229,255,0.40)';
+    ctx.fillStyle = 'rgba(0,229,255,0.5)';
     ctx.fillText(midiToName(m), w - 5, y - 3);
   }
 
   // 音程條。標了技巧的音直接換成該技巧的顏色，並在上方畫小符號
   const semiH = (h - 30) / (range.max - range.min);
   const barH = Math.max(5, Math.min(16, semiH * 0.8));
-  const techByNote = techniquesByNote(chart.techniques);
-  notes.forEach((note, i) => {
-    if (note.endMs < fromMs || note.startMs > toMs) return;
+  const techByNote = chart.techByNote || techniquesByNote(chart.techniques);
+  for (let i = 0; i < notes.length; i++) {
+    const note = notes[i];
+    if (note.endMs < fromMs) continue;
+    if (note.startMs > toMs) break;   // 依時間排序，後面都不在畫面內
     const x0 = xOf(note.startMs);
     const width = Math.max(2, (note.endMs - note.startMs) * pxPerMs);
     const y = yOf(note.midi) - barH / 2;
     const techs = techByNote.get(i);
 
-    // 播放頭正下方那一格：畫成實心並框起來，讓「+1 八度」按下去時
-    // 使用者一眼就知道會改到哪一個音
+    // 播放頭正下方那一格：畫成實心並框起來
     const isCurrent = playheadMs >= note.startMs && playheadMs <= note.endMs;
 
     ctx.fillStyle = isCurrent ? 'rgba(255,209,102,0.85)'
@@ -773,7 +1146,7 @@ function drawDetailStrip(canvas, chart, playheadMs) {
         gx += gap;
       }
     }
-  });
+  }
 
   // 播放頭
   ctx.fillStyle = 'rgba(255,255,255,0.8)';
@@ -781,31 +1154,39 @@ function drawDetailStrip(canvas, chart, playheadMs) {
   ctx.beginPath();
   ctx.arc(judgeX, 7, 4, 0, Math.PI * 2);
   ctx.fillStyle = '#ffd54a';
-  ctx.shadowColor = 'rgba(255,213,74,0.9)';
-  ctx.shadowBlur = 10;
   ctx.fill();
-  ctx.shadowBlur = 0;
 }
 
-/** 全曲總覽：整首壓成一條，用來粗略定位。 */
+/** 全曲總覽：整首壓成一條，用來粗略定位。音符部分不會變，畫一次存成點陣重用。 */
 function drawOverview(canvas, chart, playheadMs) {
   const { ctx, w, h } = setupCanvas(canvas);
-  const notes = chart.notes;
   const usable = w - OVERVIEW_PAD * 2;
   const xOf = (ms) => OVERVIEW_PAD + (ms / chart.durationMs) * usable;
+  const dpr = window.devicePixelRatio || 1;
 
-  if (notes.length) {
-    const range = noteRange(notes, 2);
-    const yOf = (m) => h - 6 - ((m - range.min) / (range.max - range.min)) * (h - 12);
-    // 總覽只用顏色區分技巧：這裡一個音才幾個像素寬，再擠符號會糊成一團
-    const techByNote = techniquesByNote(chart.techniques);
-    notes.forEach((note, i) => {
-      const techs = techByNote.get(i);
-      ctx.fillStyle = techs ? techniqueColor(techs[0], 0.85) : 'rgba(0,229,255,0.55)';
-      ctx.fillRect(xOf(note.startMs), yOf(note.midi) - 1,
-        Math.max(1, xOf(note.endMs) - xOf(note.startMs)), 2);
-    });
+  const cacheKey = `${w}x${h}@${dpr}`;
+  if (!chart.overviewCache || chart.overviewCache.key !== cacheKey) {
+    const off = document.createElement('canvas');
+    off.width = Math.max(1, Math.round(w * dpr));
+    off.height = Math.max(1, Math.round(h * dpr));
+    const octx = off.getContext('2d');
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const notes = chart.notes;
+    if (notes.length) {
+      const range = noteRange(notes, 2);
+      const yOf = (m) => h - 6 - ((m - range.min) / (range.max - range.min)) * (h - 12);
+      // 總覽只用顏色區分技巧：這裡一個音才幾個像素寬，再擠符號會糊成一團
+      const techByNote = chart.techByNote || techniquesByNote(chart.techniques);
+      notes.forEach((note, i) => {
+        const techs = techByNote.get(i);
+        octx.fillStyle = techs ? techniqueColor(techs[0], 0.85) : 'rgba(0,229,255,0.55)';
+        octx.fillRect(xOf(note.startMs), yOf(note.midi) - 1,
+          Math.max(1, xOf(note.endMs) - xOf(note.startMs)), 2);
+      });
+    }
+    chart.overviewCache = { key: cacheKey, canvas: off };
   }
+  ctx.drawImage(chart.overviewCache.canvas, 0, 0, w, h);
 
   // 目前可視範圍
   const span = visibleSpanMs($('#chart-preview'));
@@ -850,50 +1231,61 @@ function seekPreview(ms) {
 
 // 視窗大小改變時重畫，否則畫布會維持舊尺寸而變形
 window.addEventListener('resize', () => {
-  if ($('#screen-chart').classList.contains('active')) drawPreviewFrame();
-  if ($('#screen-edit').classList.contains('active')) state.editor?.draw();
+  if (state.screen === 'chart') drawPreviewFrame();
+  if (state.screen === 'edit') state.editor?.draw();
+  if (state.screen === 'result' && state.lastResult) drawResultCharts();
 });
 
-$('#octave-slider').addEventListener('input', refreshChartPreview);
-$('#sens-slider').addEventListener('input', refreshChartPreview);
-$('#level-slider').addEventListener('input', refreshChartPreview);
+for (const id of ['#octave-slider', '#sens-slider', '#level-slider']) {
+  $(id).addEventListener('input', () => { state.chartDirty = true; refreshChartPreview(); });
+}
 
 $('#chart-confirm').addEventListener('click', async () => {
   const song = state.pendingSong;
+  if (!song) return;
+  const btn = $('#chart-confirm');
+  btn.disabled = true;
+  try {
+    if (state.chartDirty) await saveChartSliders();
+  } catch {
+    // 存不進去也讓人照樣唱：這次用畫面上的值，toast 已經說明了
+  } finally {
+    btn.disabled = false;
+  }
   song.octaveOffset = Number($('#octave-slider').value);
   song.minConfidence = Number($('#sens-slider').value);
   song.minLevelDb = Number($('#level-slider').value);
   song.chartEdits = state.edits;
-  // 存回伺服器：調整過的參數跟著歌走，換一台裝置也是同一份
-  await api.saveSongSettings(song.id, {
-    octaveOffset: song.octaveOffset,
-    minConfidence: song.minConfidence,
-    minLevelDb: song.minLevelDb,
-    chartEdits: song.chartEdits,
-  });
-  startSinging(song);
+  startSinging(song, { from: 'chart' });
 });
 
-$('#chart-back').addEventListener('click', () => { stopPreview(); show('library'); });
+$('#chart-back').addEventListener('click', () => goLibrary());
 $('#chart-edit').addEventListener('click', () => openEditScreen());
 
 // -- 編輯譜面 --------------------------------------------------------------
 
-$('#edit-play').addEventListener('click', () => {
+$('#edit-play').addEventListener('click', async () => {
   const p = state.editPlayer;
   if (!p) return;
-  if (p.playing) { p.pause(); state.editPiano?.reschedule(); } else p.play();
+  await audioCtx();
+  if (p.playing) { p.pause(); state.editPiano?.reschedule(); } else {
+    if (p.currentTime >= p.duration - 0.05) p.seek(0);
+    p.play();
+  }
   $('#edit-play').textContent = p.playing ? '暫停' : '播放';
 });
 $('#edit-vocal').addEventListener('click', (e) => {
-  e.currentTarget.classList.toggle('on');
+  setToggle(e.currentTarget, !e.currentTarget.classList.contains('on'));
   applyEditVocalGain();
 });
 $('#edit-piano').addEventListener('click', (e) => {
-  e.currentTarget.classList.toggle('on');
+  setToggle(e.currentTarget, !e.currentTarget.classList.contains('on'));
   state.editPiano?.setEnabled(e.currentTarget.classList.contains('on'));
 });
 
+$('#edit-add').addEventListener('click', () => state.editor?.addNoteAtPlayhead());
+$('#edit-zoom-in').addEventListener('click', () => state.editor?.zoom(1.4));
+$('#edit-zoom-out').addEventListener('click', () => state.editor?.zoom(1 / 1.4));
 $('#edit-oct-up').addEventListener('click', () => state.editor?.shiftPitch(12));
 $('#edit-oct-down').addEventListener('click', () => state.editor?.shiftPitch(-12));
 $('#edit-semi-up').addEventListener('click', () => state.editor?.shiftPitch(1));
@@ -911,17 +1303,18 @@ $('#edit-save').addEventListener('click', async () => {
     // 存在伺服器上，所以換一台裝置連進來看到的也是編輯過的譜
     await api.saveSongSettings(song.id, { chartEdits: state.edits });
     song.chartEdits = state.edits;
-    closeEditScreen();
-    refreshChartPreview();
-    show('chart');
-    await preparePreviewPlayer(song);
+    state.editDirty = false;
+    await backToChart();
   } catch (err) {
     editStatus(`儲存失敗：${err.message}`);
   }
 });
 
 $('#edit-revert').addEventListener('click', async () => {
-  if (!confirm('會捨棄所有手動編輯，重新從音訊產生譜面。確定嗎？')) return;
+  const ok = await confirmBox('會捨棄所有手動編輯，重新從音訊產生譜面。', {
+    title: '捨棄所有編輯？', ok: '捨棄並重新產生', danger: true,
+  });
+  if (!ok) return;
   state.edits = { pitchShifts: [], notes: null };
   const song = state.pendingSong;
   editStatus('重新產生中…');
@@ -929,28 +1322,36 @@ $('#edit-revert').addEventListener('click', async () => {
     await api.saveSongSettings(song.id, { chartEdits: state.edits });
     song.chartEdits = state.edits;
     refreshChartPreview();
-    // 從譜面確認畫面的播放位置接續，使用者剛才看到哪就從哪開始編
-  state.editor.setNotes(state.previewChart.notes, state.previewChart.durationMs,
-    state.previewPlayer ? previewPositionMs() : null);
+    state.editor.setNotes(state.previewChart.notes, state.previewChart.durationMs,
+      state.editPlayer ? state.editPlayer.currentTime * 1000 : null);
     state.editPiano?.setNotes(state.previewChart.notes);
+    state.editDirty = false;
     editStatus('已還原成自動抽取的結果。');
   } catch (err) {
     editStatus(`還原失敗：${err.message}`);
   }
 });
 
-$('#edit-cancel').addEventListener('click', () => {
+/** 有沒存的編輯時問一下；回傳 true 表示可以離開。 */
+async function confirmDiscardEdits() {
+  if (state.screen !== 'edit' || !state.editDirty) return true;
+  return confirmBox('剛才的修改還沒儲存，離開就會不見。', {
+    title: '放棄未儲存的編輯？', ok: '放棄修改', cancel: '繼續編輯', danger: true,
+  });
+}
+
+$('#edit-cancel').addEventListener('click', async () => {
+  if (!(await confirmDiscardEdits())) return;
   // 取消：把記憶體裡的編輯丟掉，重讀伺服器上那份
   state.edits = normalizeEdits(state.pendingSong.chartEdits);
-  closeEditScreen();
-  refreshChartPreview();
-  show('chart');
-  preparePreviewPlayer(state.pendingSong);
+  state.editDirty = false;
+  await backToChart();
 });
 
 window.addEventListener('keydown', (e) => {
-  if (!$('#screen-edit').classList.contains('active')) return;
-  if (e.target.matches('input, textarea')) return;
+  if (state.screen !== 'edit') return;
+  if (e.target.matches('input, textarea, select')) return;
+  if (!$('#app-dialog').classList.contains('hidden')) return;
   const ed = state.editor;
   if (!ed) return;
   const big = e.shiftKey;
@@ -982,12 +1383,12 @@ window.addEventListener('keydown', (e) => {
 
 $('#preview-vocal').addEventListener('click', (e) => {
   state.vocalOn = !state.vocalOn;
-  e.currentTarget.classList.toggle('on', state.vocalOn);
+  setToggle(e.currentTarget, state.vocalOn);
   applyPreviewVocalGain();
 });
 $('#preview-piano').addEventListener('click', (e) => {
   state.pianoOn = !state.pianoOn;
-  e.currentTarget.classList.toggle('on', state.pianoOn);
+  setToggle(e.currentTarget, state.pianoOn);
   state.previewPiano?.setEnabled(state.pianoOn);
 });
 
@@ -1110,34 +1511,23 @@ function stopPreview() {
 /**
  * 組出播放用的音軌。第 0 軌是伴奏，第 1 軌是原唱（導唱）。
  * 兩軌交給同一個 worklet，共用播放位置，開關導唱不會跑掉拍。
- *
- * 後端模式有分離好的人聲軌，導唱就疊在伴奏上；簡易模式沒有乾淨人聲，
- * 導唱改成直接播原曲，並把 L−R 伴奏靜音，避免兩者疊起來變成怪異的相位。
+ * 兩軌同時下載（以前是一軌抓完才抓下一軌）。
  */
 async function loadTracks(song, ctx, onProgress = null) {
-  const guide = state.guideOn;
-
-  // 伴奏與導唱都存在伺服器上，按下演唱才抓；抓過的會走本機快取
-  const instBlob = await api.getStem(song.id, 'instrumental',
-    (done, total, cached) => onProgress?.('伴奏', done, total, cached));
-  const vocalBlob = song.hasGuide
-    ? await api.getStem(song.id, 'vocals',
-        (done, total, cached) => onProgress?.('原唱', done, total, cached))
-    : null;
-
   const [inst, vocals] = await Promise.all([
-    ctx.decodeAudioData(await instBlob.arrayBuffer()),
-    vocalBlob ? ctx.decodeAudioData(await vocalBlob.arrayBuffer()) : null,
+    getDecoded(song, 'instrumental', ctx,
+      (done, total, cached) => onProgress?.('伴奏', done, total, cached)),
+    song.hasGuide
+      ? getDecoded(song, 'vocals', ctx,
+        (done, total, cached) => onProgress?.('原唱', done, total, cached), true)
+      : null,
   ]);
 
-  const tracks = [{ buffer: inst, gain: 1 }];
-  // 導唱軌降成單聲道：人聲本來就置中，這樣可以省下一半記憶體
-  // （手機上兩軌立體聲的 4 分鐘歌曲會吃掉將近 170MB）
-  if (vocals) tracks.push({ buffer: monoBuffer(ctx, vocals), gain: guide ? GUIDE_GAIN : 0 });
-  return { tracks, mode: 'backend', hasGuide: !!vocals };
+  const tracks = [{ buffer: inst, gain: state.backingVol }];
+  // 導唱軌是單聲道：人聲本來就置中，這樣可以省下一半記憶體
+  if (vocals) tracks.push({ buffer: vocals, gain: state.guideOn ? state.guideVol : 0 });
+  return { tracks, hasGuide: !!vocals };
 }
-
-const GUIDE_GAIN = 0.75;
 
 function monoBuffer(ctx, audioBuffer) {
   if (audioBuffer.numberOfChannels === 1) return audioBuffer;
@@ -1146,163 +1536,245 @@ function monoBuffer(ctx, audioBuffer) {
   return out;
 }
 
-/** 切換導唱。依模式調整兩軌的音量，播放位置不受影響。 */
+/** 切換導唱。只改那一軌的音量，播放位置不受影響。 */
 function applyGuide(on) {
   state.guideOn = on;
   const btn = $('#guide-toggle');
   btn.textContent = on ? '原唱 開' : '原唱 關';
-  btn.classList.toggle('on', on);
-  if (!state.player || !state.playbackMode) return;
-  if (state.playbackMode === 'backend') {
-    state.player.setStemGain(1, on ? GUIDE_GAIN : 0);
-  } else {
-    state.player.setStemGain(0, on ? 0 : 1);
-    state.player.setStemGain(1, on ? 1 : 0);
+  setToggle(btn, on);
+  if (state.player?.node) state.player.setStemGain(1, on ? state.guideVol : 0);
+}
+
+const SING_BUTTONS = {
+  idle: { toggle: [true, '暫停'], restart: true, stop: '取消' },
+  prep: { toggle: [true, '暫停'], restart: true, stop: '取消' },
+  countdown: { toggle: [true, '暫停'], restart: true, stop: '取消' },
+  playing: { toggle: [false, '暫停'], restart: false, stop: '結束並計分' },
+  paused: { toggle: [false, '繼續'], restart: false, stop: '結束並計分' },
+  resuming: { toggle: [true, '繼續'], restart: true, stop: '結束並計分' },
+  done: { toggle: [true, '暫停'], restart: true, stop: '結束並計分' },
+};
+
+/** 演唱的階段決定哪些按鈕能按：準備與倒數時不能暫停，「結束」變成「取消」。 */
+function setSingPhase(phase) {
+  state.singPhase = phase;
+  const b = SING_BUTTONS[phase] || SING_BUTTONS.idle;
+  $('#sing-toggle').disabled = b.toggle[0];
+  $('#sing-toggle').textContent = b.toggle[1];
+  $('#sing-restart').disabled = b.restart;
+  $('#sing-stop').textContent = b.stop;
+  if (phase === 'playing') requestWakeLock(); else releaseWakeLock();
+}
+
+/** 停掉播放與計分（不換畫面）。 */
+function stopSingingAudio() {
+  state.singing = false;
+  cancelAnimationFrame(state.raf);
+  clearInterval(state.countdownTimer);
+  if (state.player) {
+    state.player.onended = null;
+    state.player.pause();
+  }
+  if (state.mic) { state.mic.onFrame = null; state.mic.refMidiAt = null; }
+  $('#skip-intro').classList.add('hidden');
+}
+
+/** 離開演唱畫面：不管是怎麼離開的，都要把聲音、麥克風、螢幕恆亮收乾淨。 */
+function abortSing() {
+  stopSingingAudio();
+  releaseMic();
+  setSingPhase('idle');
+  $('#countdown').classList.add('hidden');
+  $('#volume-panel').classList.add('hidden');
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+
+async function startSinging(idOrSong, { from = null } = {}) {
+  const origin = from || state.screen;
+  // 從結算頁「再唱一次」時，返回的地方維持原本的（譜面或曲庫）
+  if (origin !== 'result' && origin !== 'sing') state.singFrom = origin === 'chart' ? 'chart' : 'library';
+  stopSingingAudio();
+  show('sing');
+  const flow = state.flowId;
+  setSingPhase('prep');
+
+  const known = typeof idOrSong === 'string' ? state.allSongs.find((s) => s.id === idOrSong) : idOrSong;
+  $('#sing-song-name').textContent = known?.name || '';
+  if (known) { setCover($('#sing-cover'), known); setBackdrop($('#sing-backdrop'), known); }
+  $('#live-score').textContent = '0';
+  setPitchHint(null, true);
+  $('#sing-bar').style.width = '0%';
+  $('#countdown').classList.remove('hidden');
+  $('#countdown').textContent = '準備中';
+  $('#latency-note').textContent = '';
+
+  try {
+    const song = typeof idOrSong === 'string' ? await loadSong(idOrSong) : idOrSong;
+    if (!alive(flow)) return;
+    $('#sing-song-name').textContent = song.name;
+    setCover($('#sing-cover'), song);
+    setBackdrop($('#sing-backdrop'), song);
+
+    const ctx = await audioCtx();
+    state.song = song;
+    state.chart = rebuildChart(song.chart, {
+      minConfidence: song.minConfidence,
+      minLevelDb: song.minLevelDb,
+      octaveOffset: song.octaveOffset || 0,
+      edits: normalizeEdits(song.chartEdits),
+    });
+    state.noteStarts = state.chart.notes.map((n) => n.startMs);
+    // 升降調跟著歌記住（存在伺服器上），重唱、換裝置都不必重調
+    state.keyShift = Math.max(-6, Math.min(6, Number(song.keyShift) || 0));
+    $('#key-value').textContent = keyLabel(state.keyShift);
+
+    // 麥克風
+    const mic = await ensureMic();
+    if (!alive(flow)) return;
+    mic.silenceRms = state.silenceRms;
+
+    // 延遲：設定檔是依「麥克風 × 輸出」存的
+    const profile = findProfile(mic.deviceLabel, state.outputLabel);
+    state.latencyProfile = profile || null;
+    const outMs = ((ctx.outputLatency || 0) + (ctx.baseLatency || 0)) * 1000;
+    state.latencyMs = latencyFor(profile, outMs) + state.manualLatencyMs;
+    $('#latency-note').textContent = profile
+      ? `延遲補償 ${state.latencyMs}ms（${profile.micLabel} × ${profile.outputLabel}）`
+      : `延遲補償 ${state.latencyMs}ms（估計值，建議先做一次拍手校準）`;
+
+    // 播放器
+    if (!state.player) state.player = new KeyPlayer(ctx);
+    const { tracks, hasGuide } = await loadTracks(song, ctx,
+      (label, done, total, cached) => {
+        if (cached || !total || !alive(flow)) return;
+        $('#countdown').textContent = `${label} ${Math.round(done / total * 100)}%`;
+      });
+    if (!alive(flow)) return;
+    $('#countdown').textContent = '準備中';
+    await state.player.load(tracks);
+    if (!alive(flow)) return;
+    $('#guide-toggle').disabled = !hasGuide;
+    $('#guide-vol').disabled = !hasGuide;
+    applyGuide(hasGuide && state.guideOn);
+    state.player.connect(ctx.destination);
+    state.player.setVolume(1);
+    state.player.setStemGain(0, state.backingVol);
+    state.keyShift = state.player.setSemitones(state.keyShift);
+
+    // 評分與畫面
+    resetTake();
+    setupSingLyrics(song);
+
+    // 八度旁證：把參考譜當下的音餵給音高偵測器。只影響「判成哪個八度」，
+    // 音分仍然完全來自麥克風，唱偏多少照樣扣分。
+    mic.refMidiAt = (t, phraseStart) => {
+      if (!state.singing) return 0;
+      const songMs = state.player.songTimeAt(t) * 1000 - state.latencyMs;
+      return songMs < 0 ? 0 : state.scorer.octaveHint(songMs, phraseStart);
+    };
+    mic.onFrame = onMicFrame;
+
+    await beginTake(flow, 0);
+  } catch (err) {
+    if (!alive(flow)) return;
+    stopSingingAudio();
+    await alertBox(err.message || String(err), '無法開始演唱');
+    if (alive(flow)) {
+      if (state.singFrom === 'chart' && state.pendingSong) backToChartFromSing();
+      else goLibrary();
+    }
   }
 }
 
-async function startSinging(idOrSong) {
-  stopPreview();
-  const song = typeof idOrSong === 'string' ? await loadSong(idOrSong) : idOrSong;
-  show('sing');
-  $('#sing-song-name').textContent = song.name;
-  setCover($('#sing-cover'), song);
-  setBackdrop($('#sing-backdrop'), song);
-  $('#live-score').textContent = '0';
-  $('#pitch-hint').textContent = '—';
-  $('#countdown').classList.remove('hidden');
-  $('#countdown').textContent = '準備中';
-
-  const ctx = await audioCtx();
-  state.song = song;
-  state.chart = rebuildChart(song.chart, {
-    minConfidence: song.minConfidence,
-    minLevelDb: song.minLevelDb,
-    octaveOffset: song.octaveOffset || 0,
-    edits: normalizeEdits(song.chartEdits),
-  });
-  state.keyShift = 0;
-  $('#key-value').textContent = keyLabel(0);
-
-  // 麥克風
-  try {
-    if (!state.mic) {
-      state.mic = new MicTracker(ctx, {
-        silenceRms: state.silenceRms,
-        minConfidence: PARAMS.pitch.minConfidence,
-      });
-      await state.mic.start();
-    }
-  } catch (err) {
-    alert(`無法使用麥克風：${err.message}\n請確認瀏覽器已授權，且網址是 http://localhost。`);
-    show('library');
-    return;
-  }
-  state.mic.silenceRms = state.silenceRms;
-
-  // 延遲設定檔
-  const profile = await store.getLatencyProfile(state.mic.deviceLabel, state.outputLabel);
-  state.latencyProfile = profile || null;
-  const baseLatency = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);
-  state.latencyMs = profile
-    ? profile.offsetMs + state.manualLatencyMs
-    : Math.round(baseLatency * 1000) + state.manualLatencyMs;
-  $('#latency-note').textContent = profile
-    ? `延遲補償 ${state.latencyMs}ms（${profile.micLabel} × ${profile.outputLabel}）`
-    : `延遲補償 ${state.latencyMs}ms（估計值，建議先做一次拍手校準）`;
-
-  // 播放器
-  if (!state.player) state.player = new KeyPlayer(ctx);
-  const { tracks, mode, hasGuide } = await loadTracks(song, ctx,
-    (label, done, total, cached) => {
-      if (cached || !total) return;
-      $('#countdown').textContent = `${label} ${Math.round(done / total * 100)}%`;
-    });
-  state.playbackMode = mode;
-  await state.player.load(tracks);
-  $('#guide-toggle').disabled = !hasGuide;
-  applyGuide(hasGuide && state.guideOn);
-  state.player.connect(ctx.destination);
-  state.player.setVolume(0.9);
-  state.player.setSemitones(0);
-
-  // 評分與畫面
-  state.scorer = new LiveScorer(state.chart, { keyShift: 0 });
+/** 一次演唱的計分狀態歸零（開始與「重來」共用）。 */
+function resetTake() {
+  state.scorer = new LiveScorer(state.chart, { keyShift: state.keyShift });
   if (!state.renderer) state.renderer = new StageRenderer($('#stage'));
   state.renderer.resize();
   state.renderer.setChart(state.chart.notes, state.chart.techniques,
     noteRange(state.chart.notes, 3));
-  state.renderer.setKeyShift(0);
+  state.renderer.setKeyShift(state.keyShift);
   state.renderer.clearTrail();
-  setupSingLyrics(song);
-
-  // 八度旁證：把參考譜當下的音餵給音高偵測器。只影響「判成哪個八度」，
-  // 音分仍然完全來自麥克風，唱偏多少照樣扣分。
-  state.mic.refMidiAt = (t, phraseStart) => {
-    if (!state.singing) return 0;
-    const songMs = state.player.songTimeAt(t) * 1000 - state.latencyMs;
-    return songMs < 0 ? 0 : state.scorer.octaveHint(songMs, phraseStart);
-  };
-
-  state.mic.onFrame = (frame) => {
-    if (!state.singing) return;
-    const songMs = state.player.songTimeAt(frame.t) * 1000 - state.latencyMs;
-    if (songMs < 0) return;
-    state.scorer.addFrame({ ...frame, songMs });
-    if (frame.midi > 0) {
-      // 顯示用的八度基準要穩定，不能每一框都跟著即時最佳解跳動
-      const oct = state.scorer.displayOctave();
-      if (state.shownOct === null) state.shownOct = oct;
-      else if (oct !== state.shownOct) {
-        // 基準真的變了：把已畫的軌跡一起搬過去，否則線會斷成上下兩截
-        state.renderer.shiftTrail(oct - state.shownOct);
-        state.shownOct = oct;
-      }
-      const hint = state.scorer.currentHint(songMs, oct);
-      state.renderer.pushUserFrame(songMs, frame.midi + oct, hint === 'good');
-    }
-    if (DEBUG_OCTAVE) state.lastDiagFrame = frame;
-  };
-
   state.finished = false;
   state.lastTechCheck = 0;
   state.lastTechPopMs = -1;
   state.shownOct = null;
-  await countdown();
+  state.uiCache = {};
+  $('#live-score').textContent = '0';
+  $('#sing-bar').style.width = '0%';
+  setPitchHint(null, true);
+}
+
+/** 倒數後從 fromSec 開始播放。倒數期間離開畫面就什麼都不做。 */
+async function beginTake(flow, fromSec) {
+  setSingPhase('countdown');
+  const ok = await countdown(flow, 3, 800);
+  if (!ok) return;
+  await audioCtx();
   state.singing = true;
-  $('#sing-toggle').textContent = '暫停';
   state.player.onended = () => finishSinging();
-  state.player.play(0);
+  state.player.play(fromSec);
+  setSingPhase('playing');
   loop();
 }
 
-function countdown() {
+function onMicFrame(frame) {
+  if (!state.singing) return;
+  const songMs = state.player.songTimeAt(frame.t) * 1000 - state.latencyMs;
+  if (songMs < 0) return;
+  state.scorer.addFrame({ ...frame, songMs });
+  if (frame.midi > 0) {
+    // 顯示用的八度基準要穩定，不能每一框都跟著即時最佳解跳動
+    const oct = state.scorer.displayOctave();
+    if (state.shownOct === null) state.shownOct = oct;
+    else if (oct !== state.shownOct) {
+      // 基準真的變了：把已畫的軌跡一起搬過去，否則線會斷成上下兩截
+      state.renderer.shiftTrail(oct - state.shownOct);
+      state.shownOct = oct;
+    }
+    const hint = state.scorer.currentHint(songMs, oct);
+    state.renderer.pushUserFrame(songMs, frame.midi + oct, hint === 'good');
+  }
+  if (DEBUG_OCTAVE) state.lastDiagFrame = frame;
+}
+
+/** 倒數。回傳 false 表示使用者在倒數期間離開了。 */
+function countdown(flow, from = 3, stepMs = 800, label = null) {
   const el = $('#countdown');
   return new Promise((resolve) => {
-    let n = 3;
-    el.textContent = n;
-    const timer = setInterval(() => {
+    let n = from;
+    el.classList.remove('hidden');
+    el.textContent = label ? `${label} ${n}` : n;
+    clearInterval(state.countdownTimer);
+    state.countdownTimer = setInterval(() => {
+      if (!alive(flow)) {
+        clearInterval(state.countdownTimer);
+        el.classList.add('hidden');
+        resolve(false);
+        return;
+      }
       n -= 1;
       if (n === 0) {
-        clearInterval(timer);
+        clearInterval(state.countdownTimer);
         el.classList.add('hidden');
-        resolve();
+        resolve(true);
       } else {
-        el.textContent = n;
+        el.textContent = label ? `${label} ${n}` : n;
       }
-    }, 800);
+    }, stepMs);
   });
 }
 
-// 八度診斷讀數：網址加 ?debug=1，或演唱中直接按 D 鍵開關。
+// 八度診斷讀數：網址加 ?debug=1，或在演唱畫面按 Shift+D 開關。
 // 八度出問題時，光看畫面分不出是 YIN 抓錯、平滑器判錯、還是全域對齊沒收斂。
 let DEBUG_OCTAVE = new URLSearchParams(location.search).get('debug') === '1';
 
 window.addEventListener('keydown', (e) => {
-  if (e.key !== 'd' && e.key !== 'D') return;
-  if (e.target.matches('input, textarea')) return;
+  if (state.screen !== 'sing' || !e.shiftKey || e.key.toLowerCase() !== 'd') return;
+  if (e.target.matches('input, textarea, select')) return;
   DEBUG_OCTAVE = !DEBUG_OCTAVE;
   if (!DEBUG_OCTAVE && state.renderer) state.renderer.debugText = '';
+  toast(DEBUG_OCTAVE ? '已開啟八度診斷讀數' : '已關閉八度診斷讀數', { duration: 1800 });
 });
 
 function drawOctaveDebug(songMs) {
@@ -1321,8 +1793,47 @@ function drawOctaveDebug(songMs) {
   ].join('\n');
 }
 
+// 「準／偏高／偏低」：同一個判定要維持一小段時間才換，否則在兩個狀態之間
+// 每一幀來回切換，整顆膠囊會閃。
+const HINT_HOLD_MS = 140;
+const HINT_TEXT = { good: '準', high: '偏高 ↑', low: '偏低 ↓' };
+function setPitchHint(hint, force = false) {
+  const c = state.hintState || (state.hintState = { shown: undefined, cand: null, since: 0 });
+  const now = performance.now();
+  if (!force) {
+    if (hint === c.shown) { c.cand = hint; return; }
+    if (hint !== c.cand) { c.cand = hint; c.since = now; return; }
+    if (now - c.since < HINT_HOLD_MS) return;
+  }
+  c.shown = hint;
+  c.cand = hint;
+  const el = $('#pitch-hint');
+  el.className = `pitch-hint ${hint || 'idle'}`;
+  el.textContent = HINT_TEXT[hint] || '等待歌聲';
+}
+
+/** 下一個音離現在多遠（毫秒）；後面沒有音了回傳 Infinity。 */
+function nextNoteGap(songMs) {
+  const starts = state.noteStarts || [];
+  let lo = 0, hi = starts.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (starts[mid] <= songMs) lo = mid + 1; else hi = mid; }
+  if (lo >= starts.length) return { gap: Infinity, next: null, first: false };
+  // 目前還在某個音裡面就不算間奏
+  const prev = lo > 0 ? state.chart.notes[lo - 1] : null;
+  if (prev && prev.endMs > songMs) return { gap: 0, next: starts[lo], first: false };
+  return { gap: starts[lo] - songMs, next: starts[lo], first: lo === 0 };
+}
+
+const SKIP_MIN_GAP_MS = 8000;   // 前奏／間奏超過這麼長才給跳過鈕
+const SKIP_LEAD_MS = 3000;      // 跳到下一句前幾秒
+
 function loop() {
   cancelAnimationFrame(state.raf);
+  const ui = state.uiCache || (state.uiCache = {});
+  const scoreEl = $('#live-score');
+  const barEl = $('#sing-bar');
+  const skipEl = $('#skip-intro');
+  const skipLabel = skipEl.querySelector('span');
   const step = () => {
     if (!state.singing) return;
     const songMs = state.player.currentTime * 1000;
@@ -1330,20 +1841,40 @@ function loop() {
     if (DEBUG_OCTAVE) drawOctaveDebug(songMs);
     state.renderer.draw(songMs);
     state.lyricsView?.update(songMs);
-    $('#live-score').textContent = state.scorer.liveScore;
-    $('#sing-bar').style.width = `${Math.min(100, (songMs / state.chart.durationMs) * 100)}%`;
+
+    // 只在值變了的時候才寫 DOM：每一幀無條件寫入會觸發多餘的版面計算
+    const score = state.scorer.liveScore;
+    if (ui.score !== score) { ui.score = score; scoreEl.textContent = score; }
+    const pct = Math.min(100, Math.round((songMs / state.chart.durationMs) * 1000) / 10);
+    if (ui.pct !== pct) { ui.pct = pct; barEl.style.width = `${pct}%`; }
+
+    const { gap, first } = nextNoteGap(songMs);
+    const canSkip = gap >= SKIP_MIN_GAP_MS && gap !== Infinity;
+    if (ui.skip !== canSkip || ui.skipFirst !== first) {
+      ui.skip = canSkip;
+      ui.skipFirst = first;
+      skipEl.classList.toggle('hidden', !canSkip);
+      skipLabel.textContent = first ? '跳過前奏' : '跳過間奏';
+    }
 
     checkLiveTechnique(songMs);
-
-    const hint = state.scorer.currentHint(songMs);
-    const el = $('#pitch-hint');
-    el.className = `pitch-hint ${hint || ''}`;
-    el.textContent = hint === 'good' ? '準' : hint === 'high' ? '偏高 ↑' : hint === 'low' ? '偏低 ↓' : '—';
+    setPitchHint(state.scorer.currentHint(songMs));
 
     state.raf = requestAnimationFrame(step);
   };
   state.raf = requestAnimationFrame(step);
 }
+
+$('#skip-intro').addEventListener('click', () => {
+  if (state.singPhase !== 'playing') return;
+  const songMs = state.player.currentTime * 1000;
+  const { next } = nextNoteGap(songMs);
+  if (next === null) return;
+  const target = Math.max(songMs, next - SKIP_LEAD_MS);
+  state.player.seek(target / 1000);
+  state.lastTechCheck = target;
+  state.lyricsView?.update(target);
+});
 
 /**
  * 在最近 1.4 秒的演唱上跑一次技巧偵測，做到就彈標籤。
@@ -1359,8 +1890,7 @@ function checkLiveTechnique(songMs) {
     .map((f) => ({ t: f.t, midi: f.midi + octave, conf: f.conf, rms: f.rms }));
   if (raw.length < 20) return;
   // 跟原唱譜面分析、結算計分共用同一套流程：先做信心／音量門檻與八度修正，
-  // 再切段偵測技巧。少了這一步，雜訊與八度誤判會被直接當成技巧演出，
-  // 唱歌途中會比對照原唱時容易觸發得多。
+  // 再切段偵測技巧。
   const frames = prepareFrames(raw, PARAMS.pitch);
   const notes = framesToNotes(frames, PARAMS.pitch);
   const events = detectTechniques(notes, frames, state.chart.hopMs);
@@ -1393,29 +1923,94 @@ function popTechnique(type) {
   el.classList.add('show');
 }
 
+/** 暫停。reason 有值時跳提示（被系統中斷之類，不是使用者自己按的）。 */
+function pauseSinging(reason = '') {
+  if (state.singPhase !== 'playing') return;
+  state.player.pause();
+  state.singing = false;
+  cancelAnimationFrame(state.raf);
+  setSingPhase('paused');
+  if (reason) toast(reason, { kind: 'warn', duration: 6000 });
+}
+
+/** 繼續：先倒退兩秒再數一個短的預備拍，才接得上句子。 */
+async function resumeSinging() {
+  if (state.singPhase !== 'paused') return;
+  const flow = state.flowId;
+  setSingPhase('resuming');
+  const back = Math.max(0, state.player.currentTime - 2);
+  state.player.seek(back);
+  const ok = await countdown(flow, 2, 600, '預備');
+  if (!ok || state.singPhase !== 'resuming') return;
+  if (document.hidden) { setSingPhase('paused'); return; }   // 預備拍期間切走了
+  await audioCtx();
+  state.singing = true;
+  state.player.play();
+  setSingPhase('playing');
+  loop();
+}
+
 $('#sing-toggle').addEventListener('click', () => {
-  if (!state.player) return;
-  if (state.player.playing) {
-    state.player.pause();
-    state.singing = false;
-    cancelAnimationFrame(state.raf);
-    $('#sing-toggle').textContent = '繼續';
-  } else {
-    state.singing = true;
-    state.player.play();
-    $('#sing-toggle').textContent = '暫停';
-    loop();
-  }
+  if (state.singPhase === 'playing') pauseSinging();
+  else if (state.singPhase === 'paused') resumeSinging();
 });
 
-$('#sing-stop').addEventListener('click', () => finishSinging());
+$('#sing-restart').addEventListener('click', async () => {
+  if (!['playing', 'paused'].includes(state.singPhase)) return;
+  const flow = ++state.flowId;   // 讓進行中的預備拍失效，但不換畫面
+  stopSingingAudio();
+  state.mic.onFrame = onMicFrame;
+  state.mic.refMidiAt = (t, phraseStart) => {
+    if (!state.singing) return 0;
+    const songMs = state.player.songTimeAt(t) * 1000 - state.latencyMs;
+    return songMs < 0 ? 0 : state.scorer.octaveHint(songMs, phraseStart);
+  };
+  resetTake();
+  state.player.seek(0);
+  state.lyricsView?.update(0);
+  await beginTake(flow, 0);
+});
+
+$('#sing-stop').addEventListener('click', () => {
+  if (['prep', 'countdown', 'idle'].includes(state.singPhase)) leaveSing();
+  else finishSinging();
+});
+
+/** 不計分離開演唱畫面，回到進來的地方。 */
+function leaveSing() {
+  if (state.singFrom === 'chart' && state.pendingSong) backToChartFromSing();
+  else goLibrary();
+}
+
+function backToChartFromSing() {
+  openChartScreen(state.pendingSong);
+}
+
+$('#sing-exit').addEventListener('click', async () => {
+  if (['playing', 'paused', 'resuming'].includes(state.singPhase)) {
+    const wasPlaying = state.singPhase === 'playing';
+    if (wasPlaying) pauseSinging();
+    const ok = await confirmBox('現在離開不會計分。', { title: '離開這次演唱？', ok: '離開', cancel: '繼續唱' });
+    if (!ok) { if (wasPlaying) resumeSinging(); return; }
+  }
+  leaveSing();
+});
 
 function changeKey(delta) {
-  if (!state.player) return;
+  if (!state.player || !state.scorer) return;
   state.keyShift = state.player.setSemitones(state.keyShift + delta);
   $('#key-value').textContent = keyLabel(state.keyShift);
   state.renderer.setKeyShift(state.keyShift);
   state.scorer.setKeyShift(state.keyShift, state.player.currentTime * 1000);
+  // 跟著歌記住，延後一點再存，連按時不必每下都送
+  const song = state.song;
+  song.keyShift = state.keyShift;
+  const listed = state.allSongs.find((s) => s.id === song.id);
+  if (listed) listed.keyShift = state.keyShift;
+  clearTimeout(state.keySaveTimer);
+  state.keySaveTimer = setTimeout(() => {
+    api.saveSongSettings(song.id, { keyShift: song.keyShift }).catch(() => {});
+  }, 600);
 }
 $('#guide-toggle').addEventListener('click', async () => {
   applyGuide(!state.guideOn);
@@ -1425,39 +2020,122 @@ $('#guide-toggle').addEventListener('click', async () => {
 $('#key-up').addEventListener('click', () => changeKey(1));
 $('#key-down').addEventListener('click', () => changeKey(-1));
 
-async function finishSinging() {
-  if (!state.scorer || state.finished) return;
-  state.finished = true;
-  state.singing = false;
-  cancelAnimationFrame(state.raf);
-  state.player.pause();
-  if (state.mic) { state.mic.onFrame = null; state.mic.refMidiAt = null; }
-
-  const res = state.scorer.finish();
-  await store.saveScore({
-    songId: state.song.id,
-    total: res.total,
-    breakdown: res.breakdown,
-    techniqueCounts: res.techniqueCounts,
-    keyShift: res.keyShift,
-  });
-  showResult(res);
-  renderLibrary();
+// 音量：伴奏與原唱各自調
+$('#volume-toggle').addEventListener('click', (e) => {
+  const panel = $('#volume-panel');
+  const open = panel.classList.toggle('hidden') === false;
+  e.currentTarget.setAttribute('aria-expanded', String(open));
+});
+function applyVolumeLabels() {
+  $('#backing-vol').value = state.backingVol;
+  $('#guide-vol').value = state.guideVol;
+  $('#backing-vol-value').textContent = `${Math.round(state.backingVol * 100)}%`;
+  $('#guide-vol-value').textContent = `${Math.round(state.guideVol * 100)}%`;
 }
+$('#backing-vol').addEventListener('input', (e) => {
+  state.backingVol = Number(e.target.value);
+  applyVolumeLabels();
+  state.player?.setStemGain(0, state.backingVol);
+  store.setSetting('backingVol', state.backingVol);
+});
+$('#guide-vol').addEventListener('input', (e) => {
+  state.guideVol = Number(e.target.value);
+  applyVolumeLabels();
+  if (state.guideOn) state.player?.setStemGain(1, state.guideVol);
+  store.setSetting('guideVol', state.guideVol);
+});
+
+// 全螢幕（手機橫放唱時，網址列與狀態列都收起來）
+if (document.fullscreenEnabled) $('#fullscreen-toggle').classList.remove('hidden');
+$('#fullscreen-toggle').addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else document.documentElement.requestFullscreen().catch(() => {});
+});
+
+// ── 螢幕恆亮與音訊中斷 ───────────────────────────────────────
+
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator) || state.wakeLock) return;
+  try {
+    state.wakeLock = await navigator.wakeLock.request('screen');
+    state.wakeLock.addEventListener('release', () => { state.wakeLock = null; });
+  } catch { /* 省電模式或不支援：沒有就算了 */ }
+}
+
+function releaseWakeLock() {
+  state.wakeLock?.release().catch(() => {});
+  state.wakeLock = null;
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    // 切到別的 App（接電話、看訊息）：畫面停了計分也該停
+    if (state.singPhase === 'playing') pauseSinging('切到別的畫面，已暫停');
+  } else if (state.singPhase === 'playing') {
+    requestWakeLock();
+  }
+});
+
+navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+  if (state.singPhase === 'playing') pauseSinging('音訊裝置改變了（例如拔掉或接上耳機），已暫停');
+});
+
+window.addEventListener('beforeunload', (e) => {
+  const busy = ['playing', 'paused'].includes(state.singPhase) || state.uploads.size
+    || (state.screen === 'edit' && state.editDirty);
+  if (busy) { e.preventDefault(); e.returnValue = ''; }
+});
 
 // ── 結算 ────────────────────────────────────────────────────
 
-async function showResult(res) {
+// 唱不到這麼久就不列入紀錄（以前唱 5 秒按結束也會存一筆，還會變成個人最佳）
+const MIN_SAVE_MS = 30000;
+const MIN_SAVE_RATIO = 0.25;
+
+async function finishSinging() {
+  if (!state.scorer || state.finished) return;
+  if (!['playing', 'paused', 'resuming'].includes(state.singPhase)) return;
+  state.finished = true;
+  const sungMs = Math.round((state.player?.currentTime || 0) * 1000);
+  stopSingingAudio();
+  setSingPhase('done');
+
+  const res = state.scorer.finish();
+  const song = state.song;
+  const tooShort = sungMs < Math.min(MIN_SAVE_MS, state.chart.durationMs * MIN_SAVE_RATIO);
+  let saved = null;
+  if (!tooShort) {
+    try {
+      saved = await api.saveScore(song.id, {
+        total: res.total,
+        breakdown: res.breakdown,
+        techniqueCounts: res.techniqueCounts,
+        keyShift: res.keyShift,
+        sungMs,
+      });
+      const listed = state.allSongs.find((s) => s.id === song.id);
+      if (listed && saved) Object.assign(listed, { best: saved.best, plays: saved.plays, lastSungAt: saved.lastSungAt });
+    } catch (err) {
+      toast(`成績沒有存成功：${err.message}`, { kind: 'error' });
+    }
+  }
+  showResult(res, { tooShort, saved });
+}
+
+async function showResult(res, { tooShort = false, saved = null } = {}) {
   state.lastResult = res;
   show('result');
+  const flow = state.flowId;
   setCover($('#result-cover'), state.song);
   setBackdrop($('#result-backdrop'), state.song);
   $('#result-song-name').textContent = state.song?.name || '';
   $('#result-grade').textContent = res.grade;
   $('#result-comment').textContent = res.comment;
+  const flag = $('#result-flag');
+  flag.classList.toggle('hidden', !tooShort);
+  flag.textContent = tooShort ? '唱的時間太短，這次不列入紀錄' : '';
   result.animateScore($('#result-score'), res.total);
-  result.drawRadar($('#radar'), res.breakdown);
-  result.drawPitchCompare($('#compare'), state.chart, res);
+  drawResultCharts();
   if (res.total >= 80) result.burstParticles($('#particles'), res.total / 100);
 
   const items = result.techniqueSummary(res);
@@ -1471,19 +2149,61 @@ async function showResult(res) {
 
   setupTakeExport(res);
 
-  const best = await store.bestScore(state.song.id);
   const octaveNote = res.octaveOffset ? `（以 ${res.octaveOffset > 0 ? '+' : ''}${res.octaveOffset} 半音的八度對齊計分）` : '';
-  $('#best-note').textContent = best
-    ? `個人最佳 ${best.total.toFixed(1)} 分${octaveNote}`
-    : octaveNote;
+  const best = saved?.best ?? state.allSongs.find((s) => s.id === state.song.id)?.best;
+  const isNewBest = saved && best != null && res.total >= best && saved.plays > 1;
+  $('#best-note').textContent = (best != null
+    ? `個人最佳 ${Number(best).toFixed(1)} 分${isNewBest ? '（刷新紀錄！）' : ''}` : '') + octaveNote;
+
+  // 歷史成績：最近五次
+  $('#history-list').innerHTML = '';
+  try {
+    const rows = await api.getScores(state.song.id);
+    if (!alive(flow)) return;
+    $('#history-list').innerHTML = rows.slice(-5).reverse().map((r) => {
+      const d = new Date(r.date);
+      const when = `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      return `<li><span>${when}${r.keyShift ? `　${keyLabel(r.keyShift)}` : ''}</span><b>${Number(r.total).toFixed(1)}</b></li>`;
+    }).join('');
+  } catch { /* 歷史拿不到不影響結算 */ }
+}
+
+function drawResultCharts() {
+  const res = state.lastResult;
+  if (!res) return;
+  result.drawRadar($('#radar'), res.breakdown);
+  result.drawPitchCompare($('#compare'), state.chart, res, { pxPerSec: state.compareZoom });
+}
+
+$('#compare-zoom').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-zoom]');
+  if (!btn) return;
+  state.compareZoom = Number(btn.dataset.zoom);
+  $$('#compare-zoom button').forEach((b) => setToggle(b, b === btn));
+  drawResultCharts();
+  $('#compare-wrap').scrollLeft = 0;
+});
+
+// 音程對照圖放大後可以用滑鼠拖著捲（觸控本來就能滑）
+{
+  const wrap = $('#compare-wrap');
+  let drag = null;
+  wrap.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    drag = { x: e.clientX, left: wrap.scrollLeft };
+    wrap.classList.add('dragging');
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (drag) wrap.scrollLeft = drag.left - (e.clientX - drag.x);
+  });
+  window.addEventListener('pointerup', () => { drag = null; wrap.classList.remove('dragging'); });
 }
 
 /**
  * 匯出這次演唱的原始資料（網址加 ?debug=1 才會出現）。
  *
  * 評分的門檻要訂在哪，得看麥克風實際收到什麼：伴奏漏音有多大聲、信心值
- * 掉到多少、八度誤判到底多頻繁。這些只能從真實的一次演唱量，合成訊號量
- * 出來的數字是自己編的假設，拿來調參數等於自己驗證自己。
+ * 掉到多少、八度誤判到底多頻繁。這些只能從真實的一次演唱量。
  */
 function setupTakeExport(res) {
   const host = $('#best-note');
@@ -1493,7 +2213,7 @@ function setupTakeExport(res) {
   const btn = document.createElement('button');
   btn.id = 'export-take';
   btn.className = 'ghost tiny mt';
-  btn.textContent = '⬇ 匯出本次演唱原始資料';
+  btn.innerHTML = `${icon('download')}匯出本次演唱原始資料`;
   btn.addEventListener('click', () => {
     const take = {
       songId: state.song.id,
@@ -1533,42 +2253,84 @@ function setupTakeExport(res) {
   host.after(btn);
 }
 
-$('#result-retry').addEventListener('click', () => startSinging(state.song));
-$('#result-back').addEventListener('click', () => { show('library'); renderLibrary(); });
+$('#result-retry').addEventListener('click', () => startSinging(state.song, { from: 'result' }));
+$('#result-back').addEventListener('click', () => goLibrary());
 
 // ── 延遲校準 ────────────────────────────────────────────────
 
+function findProfile(micLabel, outputLabel) {
+  const id = `${micLabel || '未知麥克風'}｜${outputLabel || '預設輸出'}`;
+  return state.profiles.find((p) => p.id === id) || null;
+}
+
+async function loadProfiles() {
+  try { state.profiles = await api.getLatencyProfiles(); } catch { /* 保留舊的 */ }
+}
+
 async function openCalibrate() {
   show('calibrate');
+  const flow = state.flowId;
   $('#calib-result').classList.add('hidden');
+  $('#calib-status').textContent = '按下開始後會先有 8 拍前導，接著跟著拍 8 下。';
   try {
-    const ctx = await audioCtx();
-    if (!state.mic) {
-      state.mic = new MicTracker(ctx, {
-        silenceRms: state.silenceRms,
-        minConfidence: PARAMS.pitch.minConfidence,
-      });
-      await state.mic.start();
-    }
+    await ensureMic();
   } catch (err) {
-    $('#calib-status').textContent = `無法使用麥克風：${err.message}`;
+    if (alive(flow)) $('#calib-status').textContent = err.message;
     return;
   }
+  if (!alive(flow)) return;
   const { inputs, outputs } = await listDevices();
   $('#calib-mic').innerHTML = inputs
-    .map((d) => `<option value="${d.deviceId}">${escapeHtml(d.label || '麥克風')}</option>`).join('');
-  const outOptions = outputs.length
-    ? outputs.map((d) => `<option value="${escapeHtml(d.label || '輸出')}">${escapeHtml(d.label || '輸出')}</option>`).join('')
-    : ['耳機', '筆電喇叭', '外接喇叭', '藍牙耳機']
-        .map((n) => `<option value="${n}">${n}</option>`).join('');
-  $('#calib-out').innerHTML = outOptions;
-  $('#calib-out').value = state.outputLabel && outputs.some((o) => o.label === state.outputLabel)
-    ? state.outputLabel : $('#calib-out').options[0]?.value || '預設輸出';
+    .map((d) => `<option value="${escapeHtml(d.deviceId)}">${escapeHtml(d.label || '麥克風')}</option>`).join('');
+  $('#calib-mic').value = state.mic?.deviceId || inputs[0]?.deviceId || '';
+
+  // 支援 setSinkId 的瀏覽器可以真的切換輸出裝置；不支援的話這裡只是替設定檔命名
+  const canSwitch = !!state.ctx?.setSinkId && outputs.length > 0;
+  const sel = $('#calib-out');
+  if (canSwitch) {
+    sel.innerHTML = outputs.map((d) => `<option value="${escapeHtml(d.deviceId)}"
+      data-label="${escapeHtml(d.label || '輸出')}">${escapeHtml(d.label || '輸出')}</option>`).join('');
+    sel.value = outputs.some((o) => o.deviceId === state.sinkId) ? state.sinkId : outputs[0].deviceId;
+    $('#calib-out-note').textContent = '選了就會真的改從那個裝置發聲。';
+  } else {
+    const names = outputs.length ? outputs.map((d) => d.label || '輸出') : ['耳機', '筆電喇叭', '外接喇叭', '藍牙耳機'];
+    if (state.outputLabel && !names.includes(state.outputLabel)) names.unshift(state.outputLabel);
+    sel.innerHTML = names.map((n) => `<option value="${escapeHtml(n)}" data-label="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+    sel.value = state.outputLabel && names.includes(state.outputLabel) ? state.outputLabel : names[0];
+    $('#calib-out-note').textContent = '這個瀏覽器不能從網頁切換輸出裝置：這裡只用來替設定檔命名，'
+      + '實際的輸出請在系統的音效設定裡切換。';
+  }
+  await applyOutputChoice();
 }
+
+async function applyOutputChoice() {
+  const sel = $('#calib-out');
+  const opt = sel.selectedOptions[0];
+  if (!opt) return;
+  state.outputLabel = opt.dataset.label || opt.value;
+  store.setSetting('outputLabel', state.outputLabel);
+  if (state.ctx?.setSinkId && opt.value !== opt.dataset.label) {
+    state.sinkId = opt.value;
+    store.setSetting('sinkId', state.sinkId);
+    try { await state.ctx.setSinkId(state.sinkId); } catch { /* 裝置不見了 */ }
+  }
+}
+
+$('#calib-out').addEventListener('change', () => applyOutputChoice());
+$('#calib-mic').addEventListener('change', async (e) => {
+  state.micDeviceId = e.target.value || null;
+  store.setSetting('micDeviceId', state.micDeviceId);
+  try {
+    await ensureMic(state.micDeviceId);
+  } catch (err) {
+    $('#calib-status').textContent = err.message;
+  }
+});
 
 $('#calib-start').addEventListener('click', async () => {
   const btn = $('#calib-start');
   btn.disabled = true;
+  state.calibrating = true;
   $('#calib-result').classList.add('hidden');
   $('#calib-status').textContent = '播放中，跟著拍手…';
 
@@ -1577,20 +2339,11 @@ $('#calib-start').addEventListener('click', async () => {
   dots.innerHTML = Array.from({ length: beats },
     (_, i) => `<i class="${i < leadIn ? 'lead' : ''}"></i>`).join('');
 
-  const ctx = await audioCtx();
-  const micId = $('#calib-mic').value;
-  if (micId && state.mic.deviceId !== micId) {
-    state.mic.stop();
-    state.mic = new MicTracker(ctx, {
-        silenceRms: state.silenceRms,
-        minConfidence: PARAMS.pitch.minConfidence,
-      });
-    await state.mic.start(micId);
-  }
-  state.outputLabel = $('#calib-out').value;
-
-  const calibrator = new LatencyCalibrator(ctx, state.mic);
   try {
+    const ctx = await audioCtx();
+    const mic = await ensureMic(state.micDeviceId);
+    await applyOutputChoice();
+    const calibrator = new LatencyCalibrator(ctx, mic);
     const res = await calibrator.run({
       beats, leadIn,
       onBeat: (i) => {
@@ -1605,11 +2358,13 @@ $('#calib-start').addEventListener('click', async () => {
     box.classList.remove('hidden');
     box.classList.toggle('bad', !ok);
     if (ok) {
-      await persistLatency(res, state.mic.deviceLabel, state.outputLabel);
+      const outMs = ((ctx.outputLatency || 0) + (ctx.baseLatency || 0)) * 1000;
+      await persistLatency(res, mic.deviceLabel, state.outputLabel, outMs);
+      await loadProfiles();
       box.innerHTML = `
         <div class="value">${res.offsetMs} ms</div>
         <p class="muted small">${res.accepted}/${res.total} 拍有效，離散 ±${Math.round(res.spreadMs / 2)}ms</p>
-        <p class="small">已存成設定檔：${escapeHtml(state.mic.deviceLabel)} × ${escapeHtml(state.outputLabel)}</p>`;
+        <p class="small">已存成設定檔：${escapeHtml(mic.deviceLabel)} × ${escapeHtml(state.outputLabel)}</p>`;
       $('#calib-status').textContent = '校準完成。';
     } else {
       box.innerHTML = `
@@ -1621,46 +2376,47 @@ $('#calib-start').addEventListener('click', async () => {
   } catch (err) {
     $('#calib-status').textContent = `校準失敗：${err.message}`;
   } finally {
+    state.calibrating = false;
     btn.disabled = false;
-    renderProfiles();
+    if (state.screen !== 'calibrate') releaseMic();
   }
 });
 
-$('#calib-back').addEventListener('click', () => show('library'));
+$('#calib-back').addEventListener('click', () => goBack());
 
 // ── 設定 ────────────────────────────────────────────────────
 
-/**
- * 顯示內網網址與運算裝置。
- * 打包成應用程式後沒有主控台可看，這些資訊只能從介面上取得。
- */
+/** 版本、網址與運算裝置。硬體資訊只給這台電腦看。 */
 async function renderServerInfo() {
   const el = $('#server-info');
+  const info = state.serverInfo || {};
+  const rows = [['版本', `<dd>${escapeHtml(info.version || '—')}</dd>`],
+    ['曲庫', `<dd>${info.songs ?? state.allSongs.length} 首（存在電腦上）</dd>`]];
+  if (!info.isLocal) {
+    rows.push(['連線', `<dd>${info.public ? '臨時公開網址' : '內網'}</dd>`]);
+    el.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt>${v}`).join('');
+    return;
+  }
+  el.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt>${v}`).join('')
+    + '<dt>運算裝置</dt><dd class="off">偵測中…</dd>';
   try {
-    const info = await fetch('api/info', { cache: 'no-store' }).then((r) => r.json());
-    const rows = [];
-    rows.push(['這台電腦', `<dd class="url">${escapeHtml(info.localUrl || '')}</dd>`]);
-    if (info.lanUrls?.length) {
-      rows.push(['內網其他裝置',
-        info.lanUrls.map((u) => `<dd class="url">${escapeHtml(u)}</dd>`).join('')]);
-    } else {
-      rows.push(['內網其他裝置', '<dd class="off">沒有可用的憑證，內網裝置不會有麥克風</dd>']);
-    }
-    const active = (info.devices || []).find((d) => d.device && d.device === info.device);
-    rows.push(['分離運算', `<dd>${escapeHtml(active ? active.label : String(info.device || '偵測中'))}</dd>`]);
-    const others = (info.devices || [])
+    const full = await api.serverInfoFull();
+    rows.push(['這台電腦', `<dd class="url">${escapeHtml(full.localUrl || '')}</dd>`]);
+    rows.push(['內網其他裝置', full.lanUrls?.length
+      ? full.lanUrls.map((u) => `<dd class="url">${escapeHtml(u)}</dd>`).join('')
+      : '<dd class="off">沒有可用的憑證，內網裝置不會有麥克風</dd>']);
+    const active = (full.devices || []).find((d) => d.device && d.device === full.device);
+    rows.push(['分離運算', `<dd>${escapeHtml(active ? active.label : String(full.device || '偵測中'))}</dd>`]);
+    const others = (full.devices || [])
       .filter((d) => d.name !== '_torch' && d.name !== 'cpu')
       .map((d) => `${d.label}${d.available ? '✓' : '✗'}`).join('　');
-    rows.push(['偵測結果', `<dd class="off">${escapeHtml(others)}</dd>`]);
-    rows.push(['曲庫', `<dd>${info.songs ?? 0} 首（存在這台電腦上）</dd>`]);
-    const torch = (info.devices || []).find((d) => d.name === '_torch');
-    if (torch) rows.push(['版本', `<dd class="off">${escapeHtml(torch.label)}
-      ・yt-dlp ${escapeHtml(info.downloader || '未安裝')}</dd>`]);
-
-    el.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt>${v}`).join('');
+    if (others) rows.push(['偵測結果', `<dd class="off">${escapeHtml(others)}</dd>`]);
+    const torch = (full.devices || []).find((d) => d.name === '_torch');
+    rows.push(['套件', `<dd class="off">${torch ? `${escapeHtml(torch.label)}・` : ''}yt-dlp ${escapeHtml(full.downloader || '未安裝')}</dd>`]);
   } catch {
-    el.innerHTML = '<dt>狀態</dt><dd class="off">取得伺服器資訊失敗</dd>';
+    rows.push(['運算裝置', '<dd class="off">取得失敗</dd>']);
   }
+  if (state.screen === 'settings') el.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt>${v}`).join('');
 }
 
 async function renderCacheInfo() {
@@ -1674,17 +2430,19 @@ async function renderCacheInfo() {
 
 $('#cache-clear').addEventListener('click', async () => {
   await store.clearAudioCache();
+  decoded.clear();
+  stemChecked.clear();
   renderCacheInfo();
 });
 
 async function renderProfiles() {
-  const profiles = await store.listLatencyProfiles();
+  await loadProfiles();
   const list = $('#profile-list');
-  if (!profiles.length) {
+  if (!state.profiles.length) {
     list.innerHTML = '<li class="empty">還沒有任何設定檔，先做一次拍手校準。</li>';
     return;
   }
-  list.innerHTML = profiles.map((p) => `
+  list.innerHTML = state.profiles.map((p) => `
     <li data-id="${escapeHtml(p.id)}">
       <span class="pname">${escapeHtml(p.micLabel)} × ${escapeHtml(p.outputLabel)}</span>
       <span class="pval">${p.offsetMs} ms</span>
@@ -1695,7 +2453,11 @@ async function renderProfiles() {
 $('#profile-list').addEventListener('click', async (e) => {
   const btn = e.target.closest('button[data-act="del"]');
   if (!btn) return;
-  await store.deleteLatencyProfile(btn.closest('li').dataset.id);
+  try {
+    await api.deleteLatencyProfile(btn.closest('li').dataset.id);
+  } catch (err) {
+    toast(`刪除失敗：${err.message}`, { kind: 'error' });
+  }
   renderProfiles();
 });
 
@@ -1705,14 +2467,92 @@ $('#manual-latency').addEventListener('input', async (e) => {
   await store.setSetting('manualLatencyMs', state.manualLatencyMs);
 });
 
+const METER_MAX = 0.06;   // 音量表滿格對應的 RMS
+function placeMeterMark() {
+  $('#mic-meter-mark').style.left = `${Math.min(100, (state.silenceRms / METER_MAX) * 100)}%`;
+}
+
 $('#silence-slider').addEventListener('input', async (e) => {
   state.silenceRms = Number(e.target.value);
   $('#silence-value').textContent = state.silenceRms.toFixed(3);
   if (state.mic) state.mic.silenceRms = state.silenceRms;
+  placeMeterMark();
   await store.setSetting('silenceRms', state.silenceRms);
 });
 
-$('#settings-back').addEventListener('click', () => show('library'));
+// 麥克風測試：即時音量表，對照靜音門檻（以前只能盲調一個 0.008 的數字）
+let meterRaf = null;
+async function startMicTest() {
+  const btn = $('#mic-test');
+  try {
+    await ensureMic();
+  } catch (err) {
+    $('#mic-test-note').textContent = err.message;
+    return;
+  }
+  if (state.screen !== 'settings') { releaseMic(); return; }
+  btn.classList.add('on');
+  btn.setAttribute('aria-pressed', 'true');
+  btn.lastChild.textContent = '停止測試';
+  const fill = $('#mic-meter-fill');
+  const tick = () => {
+    const level = state.mic?.level || 0;
+    fill.style.width = `${Math.min(100, (level / METER_MAX) * 100)}%`;
+    fill.classList.toggle('voice', level >= state.silenceRms);
+    meterRaf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function stopMicTest() {
+  if (meterRaf === null && !$('#mic-test').classList.contains('on')) return;
+  cancelAnimationFrame(meterRaf);
+  meterRaf = null;
+  const btn = $('#mic-test');
+  btn.classList.remove('on');
+  btn.setAttribute('aria-pressed', 'false');
+  btn.lastChild.textContent = '測試麥克風';
+  $('#mic-meter-fill').style.width = '0%';
+  releaseMic();
+}
+
+$('#mic-test').addEventListener('click', () => {
+  if ($('#mic-test').classList.contains('on')) stopMicTest(); else startMicTest();
+});
+
+$('#settings-back').addEventListener('click', () => goBack());
+
+// 曲庫備份與還原（只限這台電腦）
+$('#restore-btn').addEventListener('click', () => $('#restore-file').click());
+$('#restore-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const ok = await confirmBox(`從「${file.name}」還原？曲庫裡已經有的歌會保留不動，只會加入備份裡多出來的歌。`,
+    { title: '從備份還原', ok: '開始還原' });
+  if (!ok) return;
+  const status = $('#restore-status');
+  status.textContent = '上傳中…';
+  try {
+    const res = await api.restoreLibrary(file, (p) => { status.textContent = `上傳中 ${Math.round(p * 100)}%`; });
+    status.textContent = `還原完成：加入 ${res.added} 首${res.skipped ? `，略過 ${res.skipped} 首（已存在或檔案不完整）` : ''}。`;
+    refreshLibrary();
+  } catch (err) {
+    status.textContent = `還原失敗：${err.message}`;
+  }
+});
+
+async function openSettings() {
+  show('settings');
+  const local = !!state.serverInfo?.isLocal;
+  $('#backup-card').classList.toggle('hidden', !local);
+  $('#quit-card').classList.toggle('hidden', !local);
+  placeMeterMark();
+  renderProfiles();
+  renderServerInfo();
+  renderCacheInfo();
+  if (local) renderGpu();
+}
 
 // ── 外觀（跟隨系統／淺色／深色）─────────────────────────────
 
@@ -1720,7 +2560,7 @@ function setThemePref(pref) {
   applyTheme(pref);
   // 頁首的小段腳本在樣式載入前讀這個值，避免開頁時先閃一下另一種顏色
   try { localStorage.setItem('theme', pref); } catch { /* 私密模式等讀寫不了就算了 */ }
-  $$('#theme-switch button').forEach((b) => b.classList.toggle('on', b.dataset.themePref === pref));
+  $$('#theme-switch button').forEach((b) => setToggle(b, b.dataset.themePref === pref));
 }
 
 $('#theme-switch').addEventListener('click', async (e) => {
@@ -1733,10 +2573,7 @@ $('#theme-switch').addEventListener('click', async (e) => {
 // 畫布不會自己跟著 CSS 變色：結算圖表畫一次就不動了，主題一換要重畫。
 // 演唱畫面每一幀都重畫，不用另外處理。
 onThemeChange(() => {
-  const res = state.lastResult;
-  if (!res || !$('#screen-result').classList.contains('active')) return;
-  result.drawRadar($('#radar'), res.breakdown);
-  result.drawPitchCompare($('#compare'), state.chart, res);
+  if (state.screen === 'result') drawResultCharts();
 });
 
 // ── 封面（譜面頁的更換／重抓） ─────────────────────────────────
@@ -1747,7 +2584,7 @@ function applyCoverMeta(meta) {
   song.cover = meta.cover;
   song.coverSource = meta.coverSource;
   setCover($('#chart-cover'), song);
-  const listed = state.songs?.find((s) => s.id === song.id);
+  const listed = state.allSongs.find((s) => s.id === song.id);
   if (listed) { listed.cover = meta.cover; listed.coverSource = meta.coverSource; }
 }
 
@@ -1794,7 +2631,7 @@ function applyLyricsPrefs() {
   $('#lyr-opt-ruby').checked = p.ruby;
   $('#lyr-opt-romaji').checked = p.romaji;
   $('#lyr-opt-karaoke').checked = p.karaoke;
-  $('#lyrics-toggle').classList.toggle('on', p.show);
+  setToggle($('#lyrics-toggle'), p.show);
   $('#sing-lyrics').classList.toggle('hidden-lyrics', !p.show);
   const opts = { ruby: p.ruby, romaji: p.romaji, karaoke: p.karaoke };
   state.lyricsView?.setOptions(opts);
@@ -1822,7 +2659,15 @@ async function setupSingLyrics(song) {
   if (!state.lyricsView) {
     state.lyricsView = new LyricsView($('#sing-lyrics'), { ...lyricsViewOpts(), layout: 'dam' });
   }
+  if (state.lyrics && state.lyricsSongId === song.id) {
+    // 重來／再唱一次：同一首歌的歌詞不必再抓
+    state.lyricsView.setLyrics(state.lyrics, state.chart.notes,
+      state.lyrics?.lines?.length ? '' : '這首歌沒有歌詞。可以到「譜面」頁上傳 .lrc 或貼網址');
+    state.lyricsView.update(0);
+    return;
+  }
   state.lyrics = null;
+  state.lyricsSongId = song.id;
   state.lyricsView.setLyrics(null, [], '');
   let data = null;
   try {
@@ -1842,6 +2687,7 @@ async function setupSingLyrics(song) {
 
 function setPreviewLyrics(data) {
   state.previewLyrics = data;
+  if (state.pendingSong && state.lyricsSongId === state.pendingSong.id) state.lyrics = data;
   if (!state.previewLyricsView) {
     state.previewLyricsView = new LyricsView($('#chart-lyrics'), lyricsViewOpts());
   }
@@ -1858,7 +2704,7 @@ function setPreviewLyrics(data) {
   $('#lyrics-remove').disabled = !hasLines;
   $('#lyrics-log').textContent = (data?.log || []).join('\n') || '（沒有紀錄）';
   if (data?.note) $('#lyrics-status').textContent += `｜${data.note}`;
-  if (data?.fetchError) $('#lyrics-status').textContent += `｜重抓失敗，保留原本的歌詞`;
+  if (data?.fetchError) $('#lyrics-status').textContent += '｜重抓失敗，保留原本的歌詞';
 }
 
 async function loadChartLyrics(song) {
@@ -1925,13 +2771,14 @@ $('#lyrics-file').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   e.target.value = '';
   if (!file) return;
-  if (file.size > 512 * 1024) { alert('這個檔案太大了，不像是 .lrc 歌詞檔'); return; }
+  if (file.size > 512 * 1024) { toast('這個檔案太大了，不像是 .lrc 歌詞檔', { kind: 'error' }); return; }
   const text = await file.text();
   lyricsAction(`處理「${file.name}」中…`, (song) => api.uploadLyrics(song.id, text, file.name));
 });
 
-$('#lyrics-remove').addEventListener('click', () => {
-  if (!confirm('移除這首歌的歌詞？之後可以再按「自動抓取」或上傳。')) return;
+$('#lyrics-remove').addEventListener('click', async () => {
+  const ok = await confirmBox('之後可以再按「自動抓取」或上傳。', { title: '移除這首歌的歌詞？', ok: '移除', danger: true });
+  if (!ok) return;
   lyricsAction('移除中…', async (song) => { await api.deleteLyrics(song.id); return null; });
 });
 
@@ -1956,18 +2803,30 @@ $('#lyrics-later').addEventListener('click', () => nudgeLyrics(200));
 // ── 手機連線（只在這台電腦上顯示） ──────────────────────────
 
 async function renderConnect() {
-  const info = state.serverInfo || {};
-  const lanUrl = (info.lanUrls || [])[0];
+  show('connect');
+  let info = state.serverInfo || {};
+  try { info = state.serverInfo = { ...info, ...(await api.serverInfo()) }; } catch { /* 用舊的 */ }
+  const lanUrls = info.lanUrls || [];
 
-  $('#qr-lan-url').textContent = lanUrl || '（找不到內網位址）';
-  $('#qr-lan').innerHTML = lanUrl
-    ? '<div class="qr-empty">產生中…</div>'
-    : '<div class="qr-empty">這台電腦沒有連上區域網路</div>';
-  if (lanUrl) loadQr('lan', '#qr-lan');
+  // 電腦有好幾張網卡（VPN、虛擬機）時讓使用者換，第一個是對外連線用的那張
+  $('#lan-pick').classList.toggle('hidden', lanUrls.length < 2);
+  $('#lan-select').innerHTML = lanUrls.map((u, i) => `<option value="${i}">${escapeHtml(u)}</option>`).join('');
+  showLanQr(0);
 
   $('#tunnel-on-start').checked = !!(info.settings || {}).tunnelOnStart;
   await refreshTunnel();
 }
+
+function showLanQr(idx) {
+  const lanUrl = (state.serverInfo?.lanUrls || [])[idx];
+  $('#qr-lan-url').textContent = lanUrl || '（找不到內網位址）';
+  $('#qr-lan').innerHTML = lanUrl
+    ? '<div class="qr-empty">產生中…</div>'
+    : '<div class="qr-empty">這台電腦沒有連上區域網路</div>';
+  if (lanUrl) loadQr(`lan&i=${idx}`, '#qr-lan');
+}
+
+$('#lan-select').addEventListener('change', (e) => showLanQr(Number(e.target.value)));
 
 /** QR 由伺服器產生（純 Python，不連外），這裡把 SVG 直接塞進去。 */
 async function loadQr(target, selector) {
@@ -1995,6 +2854,7 @@ async function refreshTunnel() {
   const note = $('#tunnel-note');
   const box = $('#qr-tunnel');
   const urlEl = $('#qr-tunnel-url');
+  $('#tunnel-copy').classList.toggle('hidden', !(st.running && st.shareUrl));
 
   if (!st.available && st.canInstall) {
     // 第一次按的時候伺服器會自己從 Cloudflare 官方下載，不必先打指令
@@ -2024,7 +2884,7 @@ async function refreshTunnel() {
 
   if (st.running && st.url) {
     btn.textContent = '關閉公開網址';
-    urlEl.textContent = st.url;
+    urlEl.textContent = st.shareUrl || st.url;
     loadQr('tunnel', '#qr-tunnel');
   } else {
     btn.textContent = st.starting ? '建立中…' : '建立公開網址';
@@ -2033,6 +2893,17 @@ async function refreshTunnel() {
       st.starting ? '建立中，請稍候…' : escapeHtml(st.error || '尚未建立')}</div>`;
   }
 }
+
+$('#tunnel-copy').addEventListener('click', async () => {
+  const url = state.tunnel?.shareUrl;
+  if (!url) return;
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('已複製公開網址（含存取碼）');
+  } catch {
+    toast('無法自動複製，請手動選取網址', { kind: 'warn' });
+  }
+});
 
 $('#tunnel-toggle').addEventListener('click', async () => {
   const running = state.tunnel?.running;
@@ -2053,8 +2924,8 @@ $('#tunnel-toggle').addEventListener('click', async () => {
     } catch { /* 下一輪再試 */ }
   }, 500) : null;
   try {
-    state.tunnel = await fetch(`api/tunnel/${running ? 'stop' : 'start'}`,
-      { method: 'POST' }).then((r) => r.json());
+    const res = await fetch(`api/tunnel/${running ? 'stop' : 'start'}`, { method: 'POST' });
+    state.tunnel = await res.json();
   } catch (err) {
     state.tunnel = { available: true, running: false, error: String(err.message || err) };
   }
@@ -2064,14 +2935,14 @@ $('#tunnel-toggle').addEventListener('click', async () => {
 });
 
 $('#tunnel-on-start').addEventListener('change', async (e) => {
-  await fetch('api/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tunnelOnStart: e.target.checked }),
-  });
+  try {
+    await api.saveServerSettings({ tunnelOnStart: e.target.checked });
+  } catch (err) {
+    toast(`設定沒有存成功：${err.message}`, { kind: 'error' });
+  }
 });
 
-$('#connect-back').addEventListener('click', () => { show('library'); renderLibrary(); });
+$('#connect-back').addEventListener('click', () => goBack());
 
 // ── 顯示卡加速 ──────────────────────────────────────────────
 //
@@ -2082,6 +2953,7 @@ $('#connect-back').addEventListener('click', () => { show('library'); renderLibr
 const GPU_BUSY = ['downloading', 'extracting', 'verifying'];
 let gpuPoll = null;
 let gpuDialogDone = null;   // 第一次詢問的視窗關掉時呼叫，接著才開始導覽
+let gpuDialogRelease = null;
 
 const gb = (bytes) => `${(bytes / 1073741824).toFixed(2)} GB`;
 
@@ -2148,6 +3020,8 @@ async function renderGpu() {
 
 function closeGpuDialog() {
   $('#gpu-dialog').classList.add('hidden');
+  gpuDialogRelease?.();
+  gpuDialogRelease = null;
   const done = gpuDialogDone;
   gpuDialogDone = null;
   done?.();
@@ -2161,6 +3035,7 @@ async function maybeAskGpu() {
   if (st.state !== 'idle' && st.state !== 'error') return;
   $('#gpu-dialog-body').innerHTML = gpuHtml(st, true);
   $('#gpu-dialog').classList.remove('hidden');
+  gpuDialogRelease = trapFocus($('#gpu-dialog .dialog-card'), () => closeGpuDialog());
   await new Promise((resolve) => { gpuDialogDone = resolve; });
 }
 
@@ -2176,16 +3051,18 @@ async function onGpuAction(e) {
     closeGpuDialog();
     return;
   }
-  if (act === 'remove' && !confirm('要移除 NVIDIA 加速包、改回用 CPU 分離嗎？\n重新啟動程式後生效。')) return;
+  if (act === 'remove' && !(await confirmBox('重新啟動程式後生效。', {
+    title: '移除 NVIDIA 加速包、改回用 CPU 分離？', ok: '移除', danger: true }))) return;
   if (act === 'restart') {
-    if (state.singing && !confirm('正在演唱中，重新啟動會結束這次演唱。確定嗎？')) return;
+    if (['playing', 'paused'].includes(state.singPhase)
+      && !(await confirmBox('重新啟動會結束這次演唱。', { title: '正在演唱中', ok: '重新啟動' }))) return;
     btn.disabled = true;
     btn.textContent = '重新啟動中…';
     try {
       await api.restartApp();
       location.reload();
     } catch (err) {
-      alert(err.message);
+      alertBox(err.message);
       btn.disabled = false;
       btn.textContent = '立即重新啟動';
     }
@@ -2196,7 +3073,7 @@ async function onGpuAction(e) {
   try {
     await api.gpuAction(act);
   } catch (err) {
-    alert(err.message);
+    alertBox(err.message);
   }
   await renderGpu();
 }
@@ -2205,57 +3082,66 @@ $('#gpu-dialog').addEventListener('click', onGpuAction);
 $('#gpu-settings').addEventListener('click', onGpuAction);
 
 // ── 第一次使用導覽 ──────────────────────────────────────────
+//
+// 導覽要等伺服器資訊與顯示卡詢問之後才開始，那時使用者可能已經在唱歌了。
+// 不在曲庫畫面就先記著，等回到曲庫再開始——不能蓋在演唱畫面上擋住按鈕。
 
 async function maybeStartTour(force = false) {
   const seen = await store.getSetting('tourDone', false);
   if (seen && !force) return;
-  show('library');
-  await renderLibrary();
+  if (!force && state.screen !== 'library') { state.tourPending = true; return; }
+  if (force) { show('library'); await refreshLibrary(); }
   // 等版面穩定再量位置，否則高亮框會對不準
   await new Promise((r) => setTimeout(r, 250));
+  if (state.screen !== 'library') { state.tourPending = !force; return; }
   new Tour({ onFinish: () => store.setSetting('tourDone', true) }).start();
 }
 
 $('#tour-restart').addEventListener('click', () => maybeStartTour(true));
 
-// ── 導覽 ────────────────────────────────────────────────────
+// ── 導覽列 ──────────────────────────────────────────────────
+
+/** 離開目前畫面前要不要先問（演唱中、編輯還沒存）。 */
+async function confirmLeave() {
+  if (['playing', 'paused', 'resuming'].includes(state.singPhase)) {
+    const wasPlaying = state.singPhase === 'playing';
+    if (wasPlaying) pauseSinging();
+    const ok = await confirmBox('離開會結束這次演唱，不會計分。', { title: '離開演唱？', ok: '離開', cancel: '繼續唱' });
+    if (!ok && wasPlaying) resumeSinging();
+    return ok;
+  }
+  return confirmDiscardEdits();
+}
 
 $$('button[data-goto]').forEach((btn) => {
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', async () => {
     const target = btn.dataset.goto;
-    if (state.singing) {
-      if (!confirm('離開會結束這次演唱，確定嗎？')) return;
-      state.singing = false;
-      cancelAnimationFrame(state.raf);
-      state.player?.pause();
-      if (state.mic) { state.mic.onFrame = null; state.mic.refMidiAt = null; }
-    }
-    stopPreview();
-    if (target === 'connect') { renderConnect(); show('connect'); }
+    if (!(await confirmLeave())) return;
+    if (target === 'connect') renderConnect();
     else if (target === 'calibrate') openCalibrate();
-    else if (target === 'settings') { renderProfiles(); renderServerInfo(); renderCacheInfo(); renderGpu(); show('settings'); }
-    else { renderLibrary(); show('library'); }
+    else if (target === 'settings') openSettings();
+    else goLibrary();
   });
 });
 
 $('#nav-quit').addEventListener('click', async () => {
-  if (state.singing && !confirm('正在演唱中，關閉程式會結束這次演唱。確定嗎？')) return;
-  if (!confirm('要關閉這台電腦上的唱歌評分程式嗎？\n關掉之後，手機也連不進來了。')) return;
+  const ok = await confirmBox('關掉之後，手機也連不進來了。', {
+    title: '關閉這台電腦上的唱歌評分？', ok: '關閉程式', danger: true,
+  });
+  if (!ok) return;
 
   const btn = $('#nav-quit');
   btn.disabled = true;
-  btn.textContent = '關閉中…';
-  state.singing = false;
-  cancelAnimationFrame(state.raf);
-  state.player?.pause();
-  state.mic?.stop();
+  btn.lastChild.textContent = '關閉中…';
+  abortSing();
+  releaseMic();
   try {
     await api.quitApp();
     showQuitNotice();
   } catch (err) {
     btn.disabled = false;
-    btn.textContent = '⏻ 關閉程式';
-    alert(`關閉失敗：${err.message}`);
+    btn.lastChild.textContent = '關閉程式';
+    alertBox(`關閉失敗：${err.message}`);
   }
 });
 
@@ -2269,32 +3155,75 @@ function showQuitNotice() {
   document.body.appendChild(el);
 }
 
+// ── 舊資料搬家 ──────────────────────────────────────────────
+//
+// 舊版把成績與延遲設定檔存在瀏覽器裡（跟著網址走，換網址就不見）。
+// 第一次開新版時把這個瀏覽器裡的那份搬到伺服器，搬完清掉。
+
+async function migrateLegacy() {
+  if (await store.getSetting('migratedToServer', false)) return;
+  const { scores, latency } = await store.legacyData();
+  try {
+    if (scores.length) {
+      await api.importScores(scores.map((s) => ({
+        songId: s.songId, total: s.total, breakdown: s.breakdown,
+        techniqueCounts: s.techniqueCounts, keyShift: s.keyShift, date: s.date,
+      })));
+    }
+    for (const p of latency) await api.saveLatencyProfile(p);
+    await store.setSetting('migratedToServer', true);
+    await store.clearLegacyData();
+    if (scores.length) refreshLibrary();
+  } catch { /* 下次開頁再試 */ }
+}
+
 // ── 啟動 ────────────────────────────────────────────────────
 
 (async function boot() {
+  // 快捷鍵說明依平台顯示 ⌘ 或 Ctrl
+  $$('.mod-key').forEach((el) => { el.textContent = isMac ? '⌘' : 'Ctrl'; });
+
+  show('library');
   await loadParams();
-  state.manualLatencyMs = await store.getSetting('manualLatencyMs', 0);
-  state.silenceRms = await store.getSetting('silenceRms', 0.008);
-  state.guideOn = await store.getSetting('guideVocal', false);
+  const [manual, silence, guide, theme, lyricsPrefs, sort, backingVol, guideVol, micId, outLabel, sinkId] =
+    await Promise.all([
+      store.getSetting('manualLatencyMs', 0), store.getSetting('silenceRms', 0.008),
+      store.getSetting('guideVocal', false), store.getSetting('theme', 'auto'),
+      store.getSetting('lyricsPrefs', {}), store.getSetting('librarySort', 'added'),
+      store.getSetting('backingVol', 0.9), store.getSetting('guideVol', 0.75),
+      store.getSetting('micDeviceId', null), store.getSetting('outputLabel', '預設輸出'),
+      store.getSetting('sinkId', ''),
+    ]);
+  state.manualLatencyMs = manual;
+  state.silenceRms = silence;
+  state.guideOn = guide;
+  state.sort = SORTERS[sort] ? sort : 'added';
+  state.backingVol = backingVol;
+  state.guideVol = guideVol;
+  state.micDeviceId = micId;
+  state.outputLabel = outLabel;
+  state.sinkId = sinkId;
+  $('#sort-select').value = state.sort;
   applyGuide(state.guideOn);
-  setThemePref(await store.getSetting('theme', 'auto'));
-  state.lyricsPrefs = { ...state.lyricsPrefs, ...(await store.getSetting('lyricsPrefs', {})) };
+  applyVolumeLabels();
+  setThemePref(theme);
+  state.lyricsPrefs = { ...state.lyricsPrefs, ...lyricsPrefs };
   applyLyricsPrefs();
   $('#manual-latency').value = state.manualLatencyMs;
   $('#manual-latency-value').textContent = `${state.manualLatencyMs} ms`;
   $('#silence-slider').value = state.silenceRms;
   $('#silence-value').textContent = state.silenceRms.toFixed(3);
-  await renderLibrary();
-  await renderProfiles();
-  show('library');
 
+  // 伺服器資訊很快（不再等 torch），曲庫清單與它一起拿
+  const [info] = await Promise.all([api.serverInfo().catch(() => null), refreshLibrary()]);
+  state.serverInfo = info;
   // 只有在這台電腦上才顯示「手機連線」——手機是掃 QR 進來的，不需要再看一次
-  try {
-    state.serverInfo = await api.serverInfo();
-  } catch { /* 伺服器資訊拿不到就當作非本機 */ }
-  $('#nav-connect').classList.toggle('hidden', !state.serverInfo?.isLocal);
-  // 關閉程式同理：從手機按沒有意義，伺服器那邊也會擋掉
-  $('#nav-quit').classList.toggle('hidden', !state.serverInfo?.isLocal);
+  $('#nav-connect').classList.toggle('hidden', !info?.isLocal);
+  if (info?.public) renderLibrary();   // 公開網址上不顯示刪除鈕
+
+  pollJobs();          // 重新整理前還在處理的歌接回來
+  loadProfiles();
+  migrateLegacy();
 
   // 先問顯示卡加速（下載要很久，越早開始越好），回答完才進導覽
   await maybeAskGpu();

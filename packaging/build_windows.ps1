@@ -23,7 +23,7 @@ param(
   [ValidateSet('cuda', 'cpu', 'xpu', 'directml')]
   [string]$Backend = 'cpu',
   [string]$CudaTag = 'cu126',
-  [string]$Version = '2.1.0'
+  [string]$Version = '2.2.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,7 +101,7 @@ Get-ChildItem -Path (Join-Path $Stage 'lib') -Recurse -Include '*.lib', '*.pdb' 
 Write-Host '==> 複製程式與網頁資源'
 $AppDir = Join-Path $Stage 'app'
 New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-foreach ($item in 'server.py', 'analyze.py', 'launcher.py', 'library.py', 'fetcher.py', 'tunnel.py', 'gpu_pack.py', 'lyrics.py', 'covers.py', 'index.html', 'js', 'css', 'config', 'assets') {
+foreach ($item in 'server.py', 'analyze.py', 'launcher.py', 'library.py', 'fetcher.py', 'tunnel.py', 'gpu_pack.py', 'lyrics.py', 'covers.py', 'index.html', 'icon.svg', 'manifest.webmanifest', 'js', 'css', 'config', 'assets') {
   Copy-Item -Recurse -Force (Join-Path $Proj $item) (Join-Path $AppDir $item)
 }
 
