@@ -3,6 +3,7 @@
 import globals from 'globals';
 
 export default [
+  { ignores: ['js/app.bundle.js'] },
   {
     files: ['js/**/*.js'],
     languageOptions: {

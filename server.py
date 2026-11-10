@@ -103,15 +103,15 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 # 開發模式下憑證、曲庫、設定檔也在同一層。
 STATIC_FILES = {"/": "index.html", "/index.html": "index.html",
                 "/manifest.webmanifest": "manifest.webmanifest", "/icon.svg": "icon.svg"}
-STATIC_DIRS = {"js": (".js",), "css": (".css",), "config": (".json",),
+STATIC_DIRS = {"js": (".js", ".map"), "css": (".css",), "config": (".json",),
                "assets": (".json", ".flac", ".svg", ".png", ".woff2"),
                # 開發用的音高測試頁（README 提到的 /test/pitch-test.html）
                "test": (".html", ".js")}
-TEXT_TYPES = (".html", ".js", ".css", ".json", ".svg", ".webmanifest")
+TEXT_TYPES = (".html", ".js", ".css", ".json", ".svg", ".webmanifest", ".map")
 CONTENT_TYPES = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".html": "text/html; charset=utf-8", ".json": "application/json; charset=utf-8",
                  ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json",
-                 ".flac": "audio/flac", ".png": "image/png", ".woff2": "font/woff2"}
+                 ".flac": "audio/flac", ".map": "application/json; charset=utf-8", ".png": "image/png", ".woff2": "font/woff2"}
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -584,6 +584,74 @@ class _Cache:
 
 
 STATIC_CACHE = _Cache()
+
+
+# ── 前端打包檔 ─────────────────────────────────────────────
+#
+# `npm run build`（scripts/build.mjs）會把所有 ES 模組打包成 js/app.bundle.js，
+# 並把原始碼的雜湊寫進 js/app.bundle.meta.json。打包檔只在「雜湊與目前的
+# 原始碼一致」時才送：開發時改了任何一支 js 而沒重新打包，就自動退回逐支
+# 載入，不會跑到舊程式。沒有打包檔（直接從原始碼執行）也完全能用。
+
+BUNDLE_JS = ROOT / "js" / "app.bundle.js"
+BUNDLE_META = ROOT / "js" / "app.bundle.meta.json"
+_BUNDLE = {"stamp": None, "hash": None}
+_BUNDLE_LOCK = threading.Lock()
+MODULES_BLOCK = re.compile(rb"<!-- modules:start -->.*?<!-- modules:end -->", re.S)
+
+
+def _bundle_sources() -> list[Path]:
+    out = []
+    for path in (ROOT / "js").rglob("*.js"):
+        if not path.name.startswith("app.bundle"):
+            out.append(path)
+    return out
+
+
+def bundle_source_hash() -> str:
+    """與 scripts/build.mjs 的 sourceHash() 相同：依相對路徑排序，逐一雜湊路徑與內容。"""
+    import hashlib
+    h = hashlib.sha256()
+    files = sorted(p.relative_to(ROOT).as_posix() for p in _bundle_sources())
+    for rel in files:
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update((ROOT / rel).read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def current_bundle() -> str | None:
+    """打包檔可用就回傳它的版本（原始碼雜湊），否則 None。結果依檔案修改時間快取。"""
+    try:
+        if not BUNDLE_JS.is_file() or not BUNDLE_META.is_file():
+            return None
+        stamp = tuple(sorted((str(p), p.stat().st_mtime_ns, p.stat().st_size)
+                             for p in [*_bundle_sources(), BUNDLE_JS, BUNDLE_META]))
+        with _BUNDLE_LOCK:
+            if _BUNDLE["stamp"] == stamp:
+                return _BUNDLE["hash"]
+        expected = json.loads(BUNDLE_META.read_text(encoding="utf-8")).get("sourceHash")
+        actual = bundle_source_hash()
+        ok = actual if expected == actual else None
+        if not ok:
+            print("[server] js/app.bundle.js 跟原始碼對不上（改過程式但沒重新打包），改送原始模組", flush=True)
+        with _BUNDLE_LOCK:
+            _BUNDLE.update(stamp=stamp, hash=ok)
+        return ok
+    except (OSError, ValueError):
+        return None
+
+
+def index_html() -> tuple[bytes, bytes | None, str]:
+    """首頁。有可用的打包檔時，把逐支載入的那一段換成單一的打包檔。"""
+    data, gz, etag = STATIC_CACHE.get(ROOT / "index.html")
+    version = current_bundle()
+    if not version:
+        return data, gz, etag
+    tag = f'<script type="module" src="js/app.bundle.js?v={version[:12]}"></script>'.encode()
+    html = MODULES_BLOCK.sub(lambda _m: tag, data, count=1)
+    return html, gzip.compress(html, 6), f'{etag[:-1]}-b{version[:12]}"'
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1298,7 +1366,10 @@ class Handler(BaseHTTPRequestHandler):
             if ROOT.resolve() not in full.resolve().parents or not full.is_file():
                 self._not_found()
                 return
-            data, gz, etag = STATIC_CACHE.get(full)
+            if rel == "index.html":
+                data, gz, etag = index_html()
+            else:
+                data, gz, etag = STATIC_CACHE.get(full)
         except OSError:
             self._not_found()
             return

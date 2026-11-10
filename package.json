@@ -1,12 +1,15 @@
 {
   "name": "karaoke-scoring-dev",
   "private": true,
-  "description": "開發工具（ESLint）。程式本身不需要 npm，這份只給 lint 用。",
+  "description": "開發工具（ESLint、esbuild）。程式本身不需要 npm：沒打包也能直接跑。",
   "scripts": {
-    "lint": "eslint js"
+    "lint": "eslint js",
+    "build": "node scripts/build.mjs"
   },
   "devDependencies": {
+    "esbuild": "0.24.2",
     "eslint": "9.17.0",
     "globals": "15.14.0"
-  }
+  },
+  "type": "module"
 }

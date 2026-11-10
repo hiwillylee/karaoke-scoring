@@ -23,6 +23,7 @@ export class KeyPlayer {
     this._posAtStart = 0;
     this._ctxTimeAtStart = 0;
     this.onended = null;
+    this.loadedFor = null;   // 呼叫端記錄目前載入的是哪一版音軌（重唱時沿用）
     this.gain = audioCtx.createGain();
   }
 
@@ -51,6 +52,10 @@ export class KeyPlayer {
       }
     };
 
+    // 每個聲道複製一份再「轉移」給音訊執行緒：AudioBuffer 內部的資料不能
+    // 直接轉移，而呼叫端可能還要重用同一個 AudioBuffer（譜面頁的人聲軌）。
+    // 轉移本身不再複製；呼叫端用完就放掉自己那份，常駐的只剩執行緒裡這一份。
+    // 同一首歌重唱時由呼叫端判斷 loadedFor，根本不會再走到這裡。
     const transfer = [];
     const stems = tracks.map((track) => {
       const chCount = Math.min(2, track.buffer.numberOfChannels);

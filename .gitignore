@@ -25,3 +25,6 @@ node_modules/
 package-lock.json
 settings.json
 latency.json
+js/app.bundle.js
+js/app.bundle.js.map
+js/app.bundle.meta.json

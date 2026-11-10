@@ -191,6 +191,34 @@ def main():
         check("排隊中的工作可以取消", r.status == 200 and server.JOBS[jid]["state"] == "cancelled")
         check("看得懂的錯誤訊息",
               server.friendly_error(Exception("ERROR: [youtube] abc: Private video")) == "這是私人影片，無法下載")
+
+        print("\n[7] 前端打包檔")
+        version = server.current_bundle()
+        r, body = req("GET", "/")
+        if version:
+            check("打包檔與原始碼一致時首頁改用打包檔",
+                  b"js/app.bundle.js?v=" in body and b'src="js/main.js"' not in body)
+            r, _ = req("GET", "/js/app.bundle.js")
+            check("打包檔拿得到", r.status == 200)
+        else:
+            print("  （沒有打包檔，略過「採用打包檔」的檢查；先跑 npm run build 可以一併測）")
+            check("沒有打包檔時首頁逐支載入模組", b'src="js/main.js"' in body)
+        # 原始碼改了但沒重新打包：雜湊對不上，必須退回原始模組
+        stale = tmp / "stale.meta.json"
+        stale.write_text(json.dumps({"sourceHash": "0" * 64}))
+        real_meta, real_js = server.BUNDLE_META, server.BUNDLE_JS
+        server.BUNDLE_META = stale
+        if not real_js.is_file():
+            server.BUNDLE_JS = stale
+        server._BUNDLE.update(stamp=None, hash=None)
+        try:
+            check("打包檔過期時不採用", server.current_bundle() is None)
+            r, body = req("GET", "/")
+            check("過期時首頁退回原始模組", b'src="js/main.js"' in body and b"app.bundle.js" not in
+                  body.split(b"<!-- modules:start -->")[0])
+        finally:
+            server.BUNDLE_META, server.BUNDLE_JS = real_meta, real_js
+            server._BUNDLE.update(stamp=None, hash=None)
     finally:
         srv.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)

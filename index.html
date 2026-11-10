@@ -558,6 +558,34 @@
   </div>
 </div>
 
+<!-- modules:start -->
+<!-- 沒打包時逐支載入。modulepreload 讓瀏覽器一開始就並行抓全部模組，
+     不必等 main.js 下載、解析完才發現還要哪些。有最新的打包檔時，
+     伺服器會把這整段換成單一的 js/app.bundle.js（見 server.py）。 -->
+<link rel="modulepreload" href="js/api.js">
+<link rel="modulepreload" href="js/app/chart.js">
+<link rel="modulepreload" href="js/app/core.js">
+<link rel="modulepreload" href="js/app/library.js">
+<link rel="modulepreload" href="js/app/settings.js">
+<link rel="modulepreload" href="js/app/sing.js">
+<link rel="modulepreload" href="js/calibrate.js">
+<link rel="modulepreload" href="js/chart.js">
+<link rel="modulepreload" href="js/dsp.js">
+<link rel="modulepreload" href="js/editor.js">
+<link rel="modulepreload" href="js/lyrics.js">
+<link rel="modulepreload" href="js/mic.js">
+<link rel="modulepreload" href="js/piano.js">
+<link rel="modulepreload" href="js/pitchshift.js">
+<link rel="modulepreload" href="js/render.js">
+<link rel="modulepreload" href="js/result.js">
+<link rel="modulepreload" href="js/score.js">
+<link rel="modulepreload" href="js/storage.js">
+<link rel="modulepreload" href="js/techniques.js">
+<link rel="modulepreload" href="js/theme.js">
+<link rel="modulepreload" href="js/tour.js">
+<link rel="modulepreload" href="js/ui.js">
+<link rel="modulepreload" href="js/util.js">
 <script type="module" src="js/main.js"></script>
+<!-- modules:end -->
 </body>
 </html>

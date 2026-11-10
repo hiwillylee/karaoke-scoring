@@ -27,8 +27,11 @@ jobs:
       - name: JS 語法與靜態檢查
         run: |
           npm install --no-audit --no-fund
-          for f in js/*.js; do cp "$f" /tmp/check.mjs && node --check /tmp/check.mjs; done
+          for f in js/*.js js/app/*.js; do cp "$f" /tmp/check.mjs && node --check /tmp/check.mjs; done
           npx eslint js
+
+      - name: 前端打包（伺服器測試會確認打包檔與原始碼一致時才被採用）
+        run: npm run build
 
       - name: 曲庫與網址
         run: python test/test_library.py

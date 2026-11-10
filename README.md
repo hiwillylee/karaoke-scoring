@@ -29,6 +29,10 @@ python3 test/test_parity.py     # Python／JS 兩份切段與技巧偵測必須�
 ```
 
 前端開 `/test/pitch-test.html`。靜態檢查：`ruff check .`、`npm install && npx eslint js`。
+
+前端程式在 `js/`（各畫面在 `js/app/`），不打包就能直接跑。`npm run build` 會把所有模組合成
+一支 `js/app.bundle.js`（開頁從 33 個請求降到 10 個）；伺服器只在打包檔與原始碼一致時才採用，
+改了程式沒重新打包會自動退回逐支載入。打包安裝檔時腳本會自動執行這一步（需要 npm）。
 推上 GitHub 時 CI（`.github/workflows/ci.yml`）會跑上面不需要 torch 的那幾項。
 
 打包見 [`打包說明.md`](打包說明.md)。
