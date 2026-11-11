@@ -622,7 +622,9 @@ select {
 .lyr-stack { display: grid; }
 .lyr-stack > .lyr-text { grid-area: 1 / 1; }
 .lyr-under { will-change: transform; }
-.lyr-line.big .lyr-top, .lyr-slot .lyr-top { filter: none; }
+/* 上色層一定要明確疊在上面：底層有 will-change 會自成一個堆疊層，
+   不指定的話它會蓋住上色層，唱過的字就完全不變色。 */
+.lyr-line.big .lyr-top, .lyr-slot .lyr-top { filter: none; position: relative; z-index: 1; }
 .lyr-top rt { color: transparent; }
 .wipe .ch {
   --p: 0%;
