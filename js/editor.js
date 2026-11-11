@@ -184,6 +184,30 @@ export class ChartEditor {
     this.draw();
   }
 
+  /** 「新增音符」按鈕：在播放頭加一個音，音高取選取的音或附近的音。手機沒有 Alt 鍵也能加。 */
+  addNoteAtPlayhead() {
+    const ms = this.playheadMs;
+    let midi = this.selectedNotes()[0]?.midi;
+    if (midi === undefined && this.notes.length) {
+      let best = this.notes[0];
+      for (const n of this.notes) {
+        if (Math.abs(n.startMs - ms) < Math.abs(best.startMs - ms)) best = n;
+      }
+      midi = best.midi;
+    }
+    this.addNoteAt(ms, midi ?? Math.round((this.midiLo + this.midiHi) / 2));
+  }
+
+  /** 以畫面上某個 x 為中心縮放時間軸（按鈕、Ctrl＋滾輪、雙指共用）。 */
+  zoom(factor, anchorX = null) {
+    const { w } = this.metrics();
+    const x = anchorX ?? w / 2;
+    const anchorMs = this.msOf(x);
+    this.pxPerMs = Math.max(0.02, Math.min(2, this.pxPerMs * factor));
+    this.scrollMs = Math.max(0, anchorMs - x / this.pxPerMs);
+    this.draw();
+  }
+
   selectAll() {
     this.selected = new Set(this.notes.map((_, i) => i));
     this.draw();
@@ -192,6 +216,12 @@ export class ChartEditor {
   // -- 座標換算 -----------------------------------------------------------
 
   metrics() {
+    // 畫一幀時會呼叫上千次 yOf()，每次都量版面很浪費：draw() 期間凍結一份
+    if (this._frozen) return this._frozen;
+    return this.computeMetrics();
+  }
+
+  computeMetrics() {
     const dpr = window.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();
     const w = rect.width;
@@ -302,10 +332,23 @@ export class ChartEditor {
   // -- 繪製 ---------------------------------------------------------------
 
   draw() {
+    this._frozen = null;
+    this._frozen = this.computeMetrics();
+    try {
+      this.drawFrame();
+    } finally {
+      this._frozen = null;
+    }
+  }
+
+  drawFrame() {
     const { dpr, w, h, rowH } = this.metrics();
     const c = this.canvas;
-    c.width = Math.max(1, Math.round(w * dpr));
-    c.height = Math.max(1, Math.round(h * dpr));
+    // 尺寸沒變就不重設：重設 width/height 會重新配置整塊點陣
+    const pw = Math.max(1, Math.round(w * dpr));
+    const ph = Math.max(1, Math.round(h * dpr));
+    if (c.width !== pw) c.width = pw;
+    if (c.height !== ph) c.height = ph;
     const ctx = c.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -416,10 +459,27 @@ export class ChartEditor {
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     };
 
+    // 雙指縮放：同時有兩根手指就放棄目前的拖曳，改成縮放
+    const pointers = new Map();
+    const pinchState = () => {
+      const [a, b] = [...pointers.values()];
+      return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, x: (a.x + b.x) / 2 };
+    };
+
     c.addEventListener('pointerdown', (e) => {
       const { x, y } = pos(e);
       // 沒抓到指標也要能繼續編輯（某些觸控／模擬事件會拒絕 capture）
       try { c.setPointerCapture(e.pointerId); } catch { /* 不影響後續 */ }
+      pointers.set(e.pointerId, { x, y });
+      if (pointers.size === 2) {
+        // 第二根手指放下：還原第一根手指可能已經造成的移動，改成縮放
+        if (this.drag?.snap && this.drag.moved) this.notes = JSON.parse(this.drag.snap);
+        this.stopAutoScroll();
+        this.drag = { mode: 'pinch', ...pinchState(), px0: this.pxPerMs };
+        this.draw();
+        return;
+      }
+      if (pointers.size > 2) return;
 
       // 時間尺上，或直接抓住播放頭那條線 → 跳轉
       if (y <= RULER_H || Math.abs(x - this.xOf(this.playheadMs)) <= PLAYHEAD_GRAB_PX) {
@@ -446,9 +506,12 @@ export class ChartEditor {
       else if (!this.selected.has(hit.index)) this.selected = new Set([hit.index]);
       this.onSelect(hit.note);
 
-      this.snapshot();
+      // 不在這裡存復原點：只是點一下選取（沒有拖動）的話不該多一筆空的復原紀錄。
+      // 先記下原狀，真的拖動了才在放開時存進歷史。
       this.drag = {
         mode: hit.edge ? `resize-${hit.edge}` : 'move',
+        snap: JSON.stringify(this.notes),
+        moved: false,
         startX: x,
         startY: y,
         // 記下起始狀態，拖曳時一律以「原始值 + 位移」計算，避免累積誤差
@@ -459,6 +522,17 @@ export class ChartEditor {
 
     c.addEventListener('pointermove', (e) => {
       const { x, y } = pos(e);
+      if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x, y });
+      if (this.drag?.mode === 'pinch') {
+        if (pointers.size < 2) return;
+        const now = pinchState();
+        const anchorMs = this.msOf(this.drag.x);
+        this.pxPerMs = Math.max(0.02, Math.min(2, this.drag.px0 * (now.d / this.drag.d)));
+        this.scrollMs = Math.max(0, anchorMs - now.x / this.pxPerMs);
+        this.drag.x = now.x;
+        this.draw();
+        return;
+      }
       if (!this.drag) {
         const onRuler = y <= RULER_H
           || Math.abs(x - this.xOf(this.playheadMs)) <= PLAYHEAD_GRAB_PX;
@@ -482,6 +556,8 @@ export class ChartEditor {
         return;
       }
 
+      if (!this.drag.moved && Math.hypot(x - this.drag.startX, y - this.drag.startY) < 3) return;
+      this.drag.moved = true;
       const dMs = (x - this.drag.startX) / this.pxPerMs;
       const dMidi = Math.round(this.midiOf(y) - this.midiOf(this.drag.startY));
       for (const o of this.drag.origin) {
@@ -499,14 +575,26 @@ export class ChartEditor {
     });
 
     const endDrag = (e) => {
+      pointers.delete(e.pointerId);
+      try { c.releasePointerCapture(e.pointerId); } catch { /* 已釋放 */ }
       if (!this.drag) return;
-      const wasEdit = this.drag.mode !== 'marquee' && this.drag.mode !== 'seek';
+      if (this.drag.mode === 'pinch') {
+        if (pointers.size === 0) this.drag = null;
+        return;
+      }
+      const { snap, moved } = this.drag;
+      const wasEdit = !!snap && moved;
       this.stopAutoScroll();
       this.drag = null;
-      try { c.releasePointerCapture(e.pointerId); } catch { /* 已釋放 */ }
-      // 拖曳過程已經改了資料，這裡只要排序＋通知；snapshot 在 pointerdown 就存了
-      if (wasEdit) this.commit(false);
-      else this.draw();
+      if (wasEdit) {
+        // 真的改了：拖曳前的狀態存成一筆復原點，再排序＋通知
+        this.history.push(snap);
+        if (this.history.length > MAX_HISTORY) this.history.shift();
+        this.future = [];
+        this.commit(false);
+      } else {
+        this.draw();
+      }
     };
     c.addEventListener('pointerup', endDrag);
     c.addEventListener('pointercancel', endDrag);
@@ -521,10 +609,8 @@ export class ChartEditor {
     c.addEventListener('wheel', (e) => {
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
-        const { x } = pos(e);
-        const anchorMs = this.msOf(x);
-        this.pxPerMs = Math.max(0.02, Math.min(2, this.pxPerMs * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
-        this.scrollMs = anchorMs - x / this.pxPerMs;
+        this.zoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, pos(e).x);
+        return;
       } else {
         const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
         this.scrollMs += d / this.pxPerMs;

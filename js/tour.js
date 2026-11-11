@@ -19,7 +19,7 @@ const STEPS = [
     target: '.song-card .row',
     title: '演唱與譜面',
     body: '「演唱」開始唱並即時計分；「譜面」可以先播來對照音程條準不準，'
-          + '對不上時展開「進階」微調。歌曲存在這台電腦上，手機是按下去才下載。',
+          + '對不上時可以微調或直接編輯。左上角的星號加入最愛。歌曲存在這台電腦上，手機是按下去才下載。',
   },
   {
     target: '[data-goto="calibrate"]',
@@ -35,7 +35,7 @@ const STEPS = [
   {
     target: '[data-goto="settings"]',
     title: '其他設定都在這裡',
-    body: '延遲微調、麥克風靈敏度、本機快取，以及這份導覽的重看入口。開始唱吧！',
+    body: '延遲微調、麥克風靈敏度（可以即時測試）、曲庫備份，以及這份導覽的重看入口。開始唱吧！',
   },
 ];
 
@@ -84,6 +84,8 @@ export class Tour {
     document.getElementById('tour-next').addEventListener('click', () => this.next(), opts);
     document.getElementById('tour-skip').addEventListener('click', () => this.finish(), opts);
     this.el.addEventListener('click', (e) => { if (e.target === this.el) this.finish(); }, opts);
+    // Esc 略過導覽（鍵盤使用者也要能離開）
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.finish(); }, opts);
     // 版面尺寸或捲動位置一變，遮罩與高亮框就得重算。只監聽 resize 不夠：
     // 分頁從背景切回來、字體載入完成、內容撐開高度都會改變版面，
     // 那時量到的舊座標會讓遮罩對不準（框到一塊空白）。

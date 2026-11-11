@@ -2,7 +2,6 @@
 
 執行：.venv/bin/python test/test_library.py
 """
-import json
 import shutil
 import sys
 import tempfile

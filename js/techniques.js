@@ -144,8 +144,12 @@ export function analyzeNote(core, onset, tail, durationMs, hopMs) {
     Math.floor(cents.length * 0.25),
     Math.max(Math.floor(cents.length * 0.25) + 1, Math.floor(cents.length * 0.75))
   );
+  // 中位數的算法要跟 numpy.median 一樣：偶數個時取中間兩個的平均
+  // （以前取偏上的那一個，前後端標出來的しゃくり／フォール會不一樣）
   const sorted = [...stableSlice].sort((a, b) => a - b);
-  const stableCents = sorted[sorted.length >> 1] ?? 0;
+  const mid = sorted.length >> 1;
+  const stableCents = !sorted.length ? 0
+    : sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 
   // --- しゃくり（起音由下往上滑進目標） ---
   const sp = PARAMS.shakuri;

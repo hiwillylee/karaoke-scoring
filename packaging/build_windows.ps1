@@ -23,7 +23,7 @@ param(
   [ValidateSet('cuda', 'cpu', 'xpu', 'directml')]
   [string]$Backend = 'cpu',
   [string]$CudaTag = 'cu126',
-  [string]$Version = '2.1.0'
+  [string]$Version = '2.2.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,10 +98,22 @@ foreach ($d in 'torch\include', 'torch\test') {
 Get-ChildItem -Path (Join-Path $Stage 'lib') -Recurse -Include '*.lib', '*.pdb' -EA SilentlyContinue |
   Remove-Item -Force -EA SilentlyContinue
 
+Write-Host '==> 打包前端（把所有 JS 模組合成一支，手機開頁少二十幾個請求）'
+# 沒有 npm 也能出安裝檔：伺服器找不到打包檔時會逐支載入原始模組。
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+  Push-Location $PWD.Path
+  npm install --no-audit --no-fund --silent
+  npm run build
+  Pop-Location
+} else {
+  Write-Host '！找不到 npm，略過前端打包（功能不受影響，只是開頁比較慢）'
+  Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $PWD.Path 'js\app.bundle.js'), (Join-Path $PWD.Path 'js\app.bundle.js.map'), (Join-Path $PWD.Path 'js\app.bundle.meta.json')
+}
+
 Write-Host '==> 複製程式與網頁資源'
 $AppDir = Join-Path $Stage 'app'
 New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-foreach ($item in 'server.py', 'analyze.py', 'launcher.py', 'library.py', 'fetcher.py', 'tunnel.py', 'gpu_pack.py', 'lyrics.py', 'covers.py', 'index.html', 'js', 'css', 'config', 'assets') {
+foreach ($item in 'server.py', 'analyze.py', 'launcher.py', 'library.py', 'fetcher.py', 'tunnel.py', 'gpu_pack.py', 'lyrics.py', 'covers.py', 'index.html', 'icon.svg', 'manifest.webmanifest', 'js', 'css', 'config', 'assets') {
   Copy-Item -Recurse -Force (Join-Path $Proj $item) (Join-Path $AppDir $item)
 }
 

@@ -18,7 +18,7 @@ const SEARCH_STEP = 2;
 class PitchShiftProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.stems = [];          // [{ chans, out, prevOffsets, gain }]
+    this.stems = [];          // [{ chans, out, prevOffset, gain }]
     this.length = 0;
     this.playing = false;
     this.position = 0;        // 來源樣本位置（等同輸出時間）
@@ -48,7 +48,7 @@ class PitchShiftProcessor extends AudioWorkletProcessor {
           return {
             chans,
             out: chans.map(() => new Float32Array(this.outLen)),
-            prevOffsets: chans.map(() => 0),
+            prevOffset: 0,
             gain: stem.gain === undefined ? 1 : stem.gain,
           };
         });
@@ -73,7 +73,7 @@ class PitchShiftProcessor extends AudioWorkletProcessor {
       case 'seek':
         this.position = Math.max(0, Math.min(Math.max(0, this.length - 1),
           Math.round(msg.seconds * sampleRate)));
-        for (const stem of this.stems) stem.prevOffsets = stem.prevOffsets.map(() => this.position);
+        for (const stem of this.stems) stem.prevOffset = this.position;
         this.resetOutput();
         break;
       case 'semitones':
@@ -117,6 +117,21 @@ class PitchShiftProcessor extends AudioWorkletProcessor {
     const base = this.outRead + this.outWrite;
 
     for (const stem of this.stems) {
+      // 靜音的軌（例如關掉的導唱）不必算：輸出時本來就會跳過它。
+      // 對齊位置跟著標稱位置走，重新打開時才接得上。
+      if (!stem.gain) {
+        stem.prevOffset = this.position;
+        continue;
+      }
+
+      // 左右聲道用同一個對齊位置：各自搜尋不但多花一倍運算，兩邊挑到
+      // 不同的位置還會讓立體聲的相位跑掉（聲像飄移、低頻變薄）。
+      let offset = this.position;
+      if (!bypass) {
+        offset = this.findBestOffset(stem.chans[0], this.position, stem.prevOffset);
+        stem.prevOffset = offset;
+      }
+
       for (let c = 0; c < stem.chans.length; c++) {
         const src = stem.chans[c];
         const out = stem.out[c];
@@ -128,9 +143,6 @@ class PitchShiftProcessor extends AudioWorkletProcessor {
           }
           continue;
         }
-
-        const offset = this.findBestOffset(src, this.position, stem.prevOffsets[c]);
-        stem.prevOffsets[c] = offset;
 
         for (let i = 0; i < GRAIN; i++) {
           const pos = offset + i * r;

@@ -286,7 +286,6 @@ export class StageRenderer {
   drawJudgeLine() {
     const ctx = this.ctx;
     const x = this.w * JUDGE_RATIO;
-    const grad = ctx.createLinearGradient(x - 2, 0, x + 2, 0);
     ctx.fillStyle = cssVar('--cv-judge');
     ctx.fillRect(x - 1, 0, 2, this.h);
   }
@@ -322,11 +321,15 @@ export class StageRenderer {
           ctx.quadraticCurveTo(pts[k][0], pts[k][1], mx, my);
         }
         ctx.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+        // 光暈用一條較粗的半透明線墊在底下。shadowBlur 每一幀都要做高斯
+        // 模糊，在手機上是演唱畫面最貴的一步。
         ctx.strokeStyle = cssVar(hit ? '--cv-hit' : '--cv-miss');
-        ctx.shadowColor = ctx.strokeStyle;
-        ctx.shadowBlur = 10;
+        ctx.globalAlpha = 0.25;
+        ctx.lineWidth = 9;
         ctx.stroke();
-        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = 3.5;
+        ctx.stroke();
       }
       i = j;
     }
@@ -345,10 +348,7 @@ export class StageRenderer {
     ctx.lineTo(x - 17, y + 9);
     ctx.closePath();
     ctx.fillStyle = cssVar(last.hit ? '--cv-hit' : '--cv-miss');
-    ctx.shadowColor = ctx.fillStyle;
-    ctx.shadowBlur = 16;
     ctx.fill();
-    ctx.shadowBlur = 0;
     ctx.lineWidth = 1.5;
     ctx.strokeStyle = cssVar('--cv-cursor-edge');
     ctx.stroke();

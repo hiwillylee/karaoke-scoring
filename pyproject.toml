@@ -1,0 +1,11 @@
+# 只放開發工具的設定（程式本身不是用 pip 安裝的套件）。
+
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+extend-exclude = ["packaging/licenses"]
+
+[tool.ruff.lint]
+# 只抓真正會出錯的問題：語法錯誤、未定義名稱、沒用到的匯入與變數、重複定義。
+# 排版風格不強制。
+select = ["E9", "F63", "F7", "F82", "F401", "F811", "F841"]

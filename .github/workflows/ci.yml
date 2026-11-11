@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安裝測試需要的套件（不含 torch／librosa，測試用不到）
+        run: pip install numpy ruff==0.8.4
+
+      - name: Python 靜態檢查
+        run: ruff check .
+
+      - name: JS 語法與靜態檢查
+        run: |
+          npm install --no-audit --no-fund
+          for f in js/*.js js/app/*.js; do cp "$f" /tmp/check.mjs && node --check /tmp/check.mjs; done
+          npx eslint js
+
+      - name: 前端打包（伺服器測試會確認打包檔與原始碼一致時才被採用）
+        run: npm run build
+
+      - name: 曲庫與網址
+        run: python test/test_library.py
+
+      - name: 伺服器安全與協定
+        run: python test/test_server.py
+
+      - name: Python／JS 切段與技巧偵測一致
+        run: python test/test_parity.py

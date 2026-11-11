@@ -42,9 +42,13 @@ export class Yin {
     const yb = this.yinBuffer;
     const half = this.halfSize;
 
+    // 只算到 maxTau 再多兩格（拋物線內插要用到 tau+1）。再往後的延遲
+    // 對應到 60Hz 以下，人聲用不到，以前照算是白工（約佔一半運算）。
+    const lim = Math.min(half, this.maxTau + 2);
+
     // 1) 差分函數
     yb[0] = 1;
-    for (let tau = 1; tau < half; tau++) {
+    for (let tau = 1; tau < lim; tau++) {
       let sum = 0;
       for (let i = 0; i < half; i++) {
         const d = buf[i] - buf[i + tau];
@@ -55,7 +59,7 @@ export class Yin {
 
     // 2) 累積均值正規化
     let running = 0;
-    for (let tau = 1; tau < half; tau++) {
+    for (let tau = 1; tau < lim; tau++) {
       running += yb[tau];
       yb[tau] = running === 0 ? 1 : (yb[tau] * tau) / running;
     }
@@ -81,7 +85,7 @@ export class Yin {
 
     // 4) 拋物線內插求次樣本精度
     const x0 = tauEstimate > 0 ? tauEstimate - 1 : tauEstimate;
-    const x2 = tauEstimate + 1 < half ? tauEstimate + 1 : tauEstimate;
+    const x2 = tauEstimate + 1 < lim ? tauEstimate + 1 : tauEstimate;
     let betterTau;
     if (x0 === tauEstimate) {
       betterTau = yb[tauEstimate] <= yb[x2] ? tauEstimate : x2;
@@ -181,7 +185,10 @@ export function levelFloor(frames, minLevelDb) {
   const voiced = frames.filter((f) => f.midi > 0 && f.rms > 0).map((f) => f.rms);
   if (voiced.length < 10) return 0;
   voiced.sort((a, b) => a - b);
-  const reference = voiced[Math.floor(voiced.length * 0.9)];
+  // 第 90 百分位，線性內插——與 analyze.py 的 numpy.percentile 相同
+  const pos = 0.9 * (voiced.length - 1);
+  const lo = Math.floor(pos);
+  const reference = voiced[lo] + ((voiced[lo + 1] ?? voiced[lo]) - voiced[lo]) * (pos - lo);
   return reference * Math.pow(10, minLevelDb / 20);
 }
 
@@ -483,18 +490,44 @@ export function toMono(audioBuffer) {
 }
 
 /** 線性內插重取樣。 */
-export function resample(input, fromRate, toRate) {
+/**
+ * 重取樣。降取樣時先用三角窗平均做低通，否則高於新奈奎斯特頻率的成分
+ * （齒音、伴奏漏音的高頻）會折返成假的低頻，干擾音高偵測。
+ *
+ * @param out 可傳入重複使用的輸出陣列（長度要夠），避免每 10ms 配置一次
+ */
+export function resample(input, fromRate, toRate, out = null) {
   if (fromRate === toRate) return input;
   const ratio = fromRate / toRate;
   const outLen = Math.floor(input.length / ratio);
-  const out = new Float32Array(outLen);
-  for (let i = 0; i < outLen; i++) {
-    const pos = i * ratio;
-    const i0 = Math.floor(pos);
-    const frac = pos - i0;
-    const a = input[i0] || 0;
-    const b = input[i0 + 1] !== undefined ? input[i0 + 1] : a;
-    out[i] = a + (b - a) * frac;
+  const dst = out && out.length >= outLen ? out.subarray(0, outLen) : new Float32Array(outLen);
+  if (ratio <= 1) {
+    for (let i = 0; i < outLen; i++) {
+      const pos = i * ratio;
+      const i0 = Math.floor(pos);
+      const frac = pos - i0;
+      const a = input[i0] || 0;
+      const b = input[i0 + 1] !== undefined ? input[i0 + 1] : a;
+      dst[i] = a + (b - a) * frac;
+    }
+    return dst;
   }
-  return out;
+  // 三角窗半寬 = ratio：截止頻率約落在新取樣率的奈奎斯特附近
+  const half = Math.ceil(ratio);
+  const last = input.length - 1;
+  for (let i = 0; i < outLen; i++) {
+    const center = i * ratio;
+    const c0 = Math.floor(center);
+    let sum = 0;
+    let wsum = 0;
+    for (let k = c0 - half + 1; k <= c0 + half; k++) {
+      const w = 1 - Math.abs(k - center) / ratio;
+      if (w <= 0) continue;
+      const idx = k < 0 ? 0 : k > last ? last : k;
+      sum += input[idx] * w;
+      wsum += w;
+    }
+    dst[i] = wsum ? sum / wsum : 0;
+  }
+  return dst;
 }

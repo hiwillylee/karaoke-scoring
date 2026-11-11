@@ -3,6 +3,7 @@
 import { cssVar } from './theme.js';
 import { noteRange, midiToName } from './chart.js';
 import { TECHNIQUE_LABELS } from './techniques.js';
+import { setupCanvas, fmtTime } from './util.js';
 
 const RADAR_AXES = [
   { key: 'pitch', label: '音程' },
@@ -12,15 +13,8 @@ const RADAR_AXES = [
   { key: 'completion', label: '完唱度' },
 ];
 
-function setupCanvas(canvas) {
-  const dpr = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  canvas.width = Math.max(1, Math.round(rect.width * dpr));
-  canvas.height = Math.max(1, Math.round(rect.height * dpr));
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, w: rect.width, h: rect.height };
-}
+// 畫布上的字用介面同一套字型（以前寫死了沒有載入的 Noto Sans TC）
+const FONT = () => getComputedStyle(document.body).fontFamily || 'sans-serif';
 
 /** 分數由 0 跑上去，帶輕微緩動。 */
 export function animateScore(el, target, durationMs = 1600) {
@@ -94,7 +88,8 @@ export function drawRadar(canvas, breakdown) {
   ctx.shadowBlur = 0;
 
   // 標籤
-  ctx.font = '12px "Noto Sans TC", sans-serif';
+  const font = FONT();
+  ctx.font = `12px ${font}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   RADAR_AXES.forEach((axis, i) => {
@@ -106,26 +101,37 @@ export function drawRadar(canvas, breakdown) {
     ctx.fillStyle = cssVar('--cv-ref');
     ctx.font = 'bold 12px ui-monospace, monospace';
     ctx.fillText(`${(breakdown[axis.key] || 0).toFixed(0)}`, x, y + 8);
-    ctx.font = '12px "Noto Sans TC", sans-serif';
+    ctx.font = `12px ${font}`;
   });
 }
 
-/** 整曲音程對照：參考譜（青色長條） vs 實唱（洋紅線）。 */
-export function drawPitchCompare(canvas, chart, result) {
+/**
+ * 整曲音程對照：參考譜（長條） vs 實唱（線）。
+ *
+ * 四分鐘壓進一個卡片寬度時根本看不出東西，所以預設用固定的時間比例
+ * 畫成長條，外層容器可以左右捲動；pxPerSec=0 時才整首壓成一條（總覽）。
+ */
+export function drawPitchCompare(canvas, chart, result, { pxPerSec = 0 } = {}) {
+  const duration = chart.durationMs || 1;
+  if (pxPerSec > 0) {
+    canvas.style.width = `${Math.max(canvas.parentElement?.clientWidth || 0,
+      Math.round((duration / 1000) * pxPerSec))}px`;
+  } else {
+    canvas.style.width = '100%';
+  }
   const { ctx, w, h } = setupCanvas(canvas);
-  ctx.clearRect(0, 0, w, h);
 
   const notes = chart.notes;
   if (!notes.length) return;
   const shift = result.keyShift || 0;
   const range = noteRange(notes.map((n) => ({ ...n, midi: n.midi + shift })), 2);
-  const duration = chart.durationMs;
-  const padL = 34, padR = 8, padT = 8, padB = 16;
+  const padL = 34, padR = 8, padT = 8, padB = 18;
   const plotW = w - padL - padR;
   const plotH = h - padT - padB;
 
   const xOf = (ms) => padL + (ms / duration) * plotW;
   const yOf = (midi) => padT + plotH - ((midi - range.min) / (range.max - range.min)) * plotH;
+  const semiH = plotH / Math.max(1, range.max - range.min);
 
   // 八度格線
   ctx.font = '10px ui-monospace, monospace';
@@ -143,19 +149,37 @@ export function drawPitchCompare(canvas, chart, result) {
     ctx.fillText(midiToName(m), padL - 5, y);
   }
 
-  // 參考譜
+  // 時間刻度：放大時每 10 秒一格，總覽時每 30 秒
+  const stepMs = pxPerSec > 0 ? 10000 : 30000;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = cssVar('--cv-label');
+  for (let t = stepMs; t < duration; t += stepMs) {
+    const x = xOf(t);
+    ctx.strokeStyle = cssVar('--cv-grid');
+    ctx.beginPath();
+    ctx.moveTo(x, padT);
+    ctx.lineTo(x, padT + plotH);
+    ctx.stroke();
+    ctx.fillText(fmtTime(t), x, h - 4);
+  }
+
+  // 參考譜：至少半個半音高，放大時是看得出長短的長條
+  const barH = Math.max(3, Math.min(10, semiH * 0.7));
   ctx.fillStyle = cssVar('--cv-ref');
-  ctx.globalAlpha = 0.55;
+  ctx.globalAlpha = 0.5;
   for (const note of notes) {
     const y = yOf(note.midi + shift);
-    ctx.fillRect(xOf(note.startMs), y - 2, Math.max(1.5, xOf(note.endMs) - xOf(note.startMs)), 4);
+    ctx.fillRect(xOf(note.startMs), y - barH / 2, Math.max(2, xOf(note.endMs) - xOf(note.startMs)), barH);
   }
   ctx.globalAlpha = 1;
 
   // 實唱
   const oct = result.octaveOffset || 0;
   ctx.strokeStyle = cssVar('--cv-user');
-  ctx.lineWidth = 1.4;
+  ctx.lineWidth = pxPerSec > 0 ? 2.2 : 1.6;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
   ctx.beginPath();
   let pen = false;
   let prevT = -1e9;
@@ -188,7 +212,7 @@ export function burstParticles(canvas, strength = 1) {
     vx: (Math.random() - 0.5) * 7,
     vy: (Math.random() - 0.5) * 7 - 1.5,
     life: 1,
-    hue: Math.random() < 0.5 ? '255,213,74' : '0,229,255',
+    color: Math.random() < 0.5 ? cssVar('--cv-hit') : cssVar('--cv-ref'),
   }));
 
   let raf;
@@ -204,8 +228,10 @@ export function burstParticles(canvas, strength = 1) {
       p.life -= 0.012;
       ctx.beginPath();
       ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${p.hue},${Math.max(0, p.life)})`;
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
       ctx.fill();
+      ctx.globalAlpha = 1;
     }
     if (alive) raf = requestAnimationFrame(tick);
     else ctx.clearRect(0, 0, w, h);

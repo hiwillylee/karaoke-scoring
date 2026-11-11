@@ -11,7 +11,7 @@ PROJ="$PWD"
 
 APP_NAME="唱歌評分"
 BUNDLE_ID="com.karaoke.scoring"
-VERSION="${VERSION:-2.1.0}"
+VERSION="${VERSION:-2.2.0}"
 BUILD="$PROJ/build"
 APP="$BUILD/$APP_NAME.app"
 RES="$APP/Contents/Resources"
@@ -51,9 +51,18 @@ rm -rf "$RES/lib/torch/include" "$RES/lib/torch/test" 2>/dev/null || true
 find "$RES/lib" -name "*.a" -delete 2>/dev/null || true
 find "$RES/lib" -path "*/tests/*" -name "*.py" -delete 2>/dev/null || true
 
+echo "==> 打包前端（把所有 JS 模組合成一支，手機開頁少二十幾個請求）"
+# 沒有 npm 也能出安裝檔：伺服器找不到打包檔時會逐支載入原始模組。
+if command -v npm >/dev/null; then
+  (cd "$PROJ" && npm install --no-audit --no-fund --silent && npm run build)
+else
+  echo "！找不到 npm，略過前端打包（功能不受影響，只是開頁比較慢）"
+  rm -f "$PROJ/js/app.bundle.js" "$PROJ/js/app.bundle.js.map" "$PROJ/js/app.bundle.meta.json"
+fi
+
 echo "==> 複製程式與網頁資源"
 mkdir -p "$RES/app"
-for item in server.py analyze.py launcher.py library.py fetcher.py tunnel.py gpu_pack.py lyrics.py covers.py index.html js css config assets; do
+for item in server.py analyze.py launcher.py library.py fetcher.py tunnel.py gpu_pack.py lyrics.py covers.py index.html icon.svg manifest.webmanifest js css config assets; do
   ditto "$item" "$RES/app/$item"
 done
 

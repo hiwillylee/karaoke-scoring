@@ -3,7 +3,7 @@
 
 #define MyAppName "唱歌評分"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.1.0"
+  #define MyAppVersion "2.2.0"
 #endif
 
 [Setup]
