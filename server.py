@@ -923,7 +923,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._not_found()
                 return
             result = action()
-            self._json(result, 400 if "error" in result else 200)
+            # 動作被拒絕時回的是只有 error 的字典；成功時回的是完整狀態，
+            # 而完整狀態裡永遠有 error 這個欄位（平常是空字串、上次下載失敗時
+            # 是失敗原因），所以不能用「有沒有 error」來判斷這次動作有沒有成功。
+            self._json(result, 200 if "state" in result else 400)
             return
 
         if path.startswith("/api/tunnel/"):
