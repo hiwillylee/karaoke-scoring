@@ -39,7 +39,15 @@ INDEX_URL = "https://download.pytorch.org/whl"
 # 上要求的最低驅動版本。
 CUDA_TAGS = [("cu132", (580, 88)), ("cu130", (580, 88)),
              ("cu128", (528, 33)), ("cu126", (528, 33))]
-MIN_DRIVER = min(d for _, d in CUDA_TAGS)
+# 每種 CUDA 的 wheel 支援的最低「運算能力」（compute capability）。CUDA 13 起
+# 不再支援 Turing（7.5）之前的顯示卡，cu128 的 wheel 也拿掉了 Maxwell／Pascal；
+# 在 GTX 970（5.2）這類舊卡上能載入、但一運算就丟 cudaErrorNoKernelImageForDevice。
+MIN_CAP = {"cu132": (7, 5), "cu130": (7, 5), "cu128": (7, 0), "cu126": (5, 0), "cu118": (5, 0)}
+# 舊顯示卡的退路：內附那一版 torch 沒有支援這張卡的 CUDA wheel 時，改抓這幾種
+# CUDA 底下「不比內附新」的最新一版 torch。demucs／torchcrepe 是純 Python，
+# torchaudio 沿用內附的（跟現行 cu132 的做法一樣），所以 torch 版號可以不同。
+LEGACY_TAGS = [("cu126", (528, 33)), ("cu118", (452, 39))]
+MIN_DRIVER = min(d for _, d in CUDA_TAGS + LEGACY_TAGS)
 # 下載 2.5GB ＋解開後約 4.5GB，留一點餘裕
 NEED_FREE_BYTES = 8 * 1024 ** 3
 
@@ -144,7 +152,19 @@ def detect_gpu() -> dict | None:
         parts = tuple(int(x) for x in driver.split(".")[:2])
     except ValueError:
         parts = (0, 0)
-    return {"name": name, "driver": driver, "driverOk": parts >= MIN_DRIVER}
+    # 運算能力另外問：太舊的 nvidia-smi 不認得 compute_cap 這個欄位，
+    # 跟上面合在一起問會連名稱都拿不到。問不到就是 None，安裝時靠試跑判斷。
+    cap = None
+    try:
+        raw = subprocess.run(
+            [exe, "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10, **kw,
+        ).stdout.strip().splitlines()
+        major, _, minor = raw[0].strip().partition(".")
+        cap = [int(major), int(minor or 0)]
+    except Exception:  # noqa: BLE001
+        cap = None
+    return {"name": name, "driver": driver, "driverOk": parts >= MIN_DRIVER, "cap": cap}
 
 
 # ── 下載與安裝 ────────────────────────────────────────────
@@ -262,37 +282,45 @@ class GpuPack:
 
         base = _base(bundled_torch_version())
         self._set(message="查詢 PyTorch 官方伺服器…")
-        tag, wheels = _pick_wheels(base, self._gpu or {})
-        total = sum(w["size"] or 0 for w in wheels)
-        self._set(total=total)
+        # 通常只有一個候選。問不到顯示卡的運算能力時，會先試跟內附同版號的，
+        # 在顯示卡上跑不動再退到舊顯示卡用的版本。
+        detail = ""
+        for tag, wheels in _candidates(base, self._gpu or {}):
+            total = sum(w["size"] or 0 for w in wheels)
+            self._set(state="downloading", done=0, total=total)
 
-        done_before = 0
-        files = []
-        for w in wheels:
-            dest = dl / w["filename"]
-            self._set(message=f"下載 {w['filename']}")
-            self._download(w, dest, done_before)
-            done_before += dest.stat().st_size
-            files.append(dest)
+            done_before = 0
+            files = []
+            for w in wheels:
+                dest = dl / w["filename"]
+                self._set(message=f"下載 {w['filename']}")
+                self._download(w, dest, done_before)
+                done_before += dest.stat().st_size
+                files.append(dest)
 
-        self._set(state="extracting", message="解壓縮中…")
-        if staging.exists():
-            shutil.rmtree(_long(staging))
-        site = staging / "site"
-        site.mkdir(parents=True)
-        for f in files:
-            with zipfile.ZipFile(f) as zf:
-                for member in zf.infolist():
-                    if self._cancel.is_set():
-                        raise _Cancelled
-                    if _skip_member(member.filename):
-                        continue
-                    zf.extract(member, _long(site))
+            self._set(state="extracting", message="解壓縮中…")
+            if staging.exists():
+                shutil.rmtree(_long(staging))
+            site = staging / "site"
+            site.mkdir(parents=True)
+            for f in files:
+                with zipfile.ZipFile(f) as zf:
+                    for member in zf.infolist():
+                        if self._cancel.is_set():
+                            raise _Cancelled
+                        if _skip_member(member.filename):
+                            continue
+                        zf.extract(member, _long(site))
 
-        self._set(state="verifying", message="在顯示卡上試跑一次…")
-        ok, detail = _verify(site)
-        if not ok:
-            raise RuntimeError(f"CUDA 版 PyTorch 無法在這台電腦上執行：{detail}")
+            self._set(state="verifying", message="在顯示卡上試跑一次…")
+            ok, detail = _verify(site)
+            if ok:
+                break
+            print(f"[gpu] {tag} 在這張顯示卡上跑不動：{detail}", file=sys.stderr, flush=True)
+            for f in files:  # 一份 2GB，不留著佔空間
+                f.unlink(missing_ok=True)
+        else:
+            raise RuntimeError(f"CUDA 版 PyTorch 無法在這台電腦上執行：{detail or '找不到可用的版本'}")
 
         (staging / "ok.json").write_text(json.dumps({
             "torchBase": base, "cuda": tag, "installedAt": int(time.time()),
@@ -371,34 +399,84 @@ def _driver_tuple(gpu: dict) -> tuple[int, int]:
         return (0, 0)
 
 
-def _pick_wheels(base: str | None, gpu: dict) -> tuple[str, list[dict]]:
-    """挑出有同版號 wheel、而且驅動夠新的 CUDA 版本。"""
+def _cap_tuple(gpu: dict) -> tuple[int, int] | None:
+    cap = gpu.get("cap")
+    try:
+        return (int(cap[0]), int(cap[1])) if cap else None
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _candidates(base: str | None, gpu: dict):
+    """依序產生可以試的（CUDA 版本, wheels）。
+
+    先是跟內附 torch 同版號的；顯示卡太舊（或問不到運算能力、試跑失敗）時，
+    再來是 LEGACY_TAGS 裡還支援舊顯示卡的版本。完全沒有可試的就丟錯誤說明原因。
+    """
     if not base:
         raise RuntimeError("讀不到內附的 PyTorch 版本")
     driver = _driver_tuple(gpu)
+    cap = _cap_tuple(gpu)
     too_old = None
-    for tag, need in CUDA_TAGS:
-        torch_whl = _find_wheel("torch", base, tag)
-        if not torch_whl:
-            continue
+    found = 0
+    tried = set()
+
+    def usable(tag: str, need: tuple[int, int]) -> bool:
+        nonlocal too_old
+        if cap is not None and cap < MIN_CAP.get(tag, (0, 0)):
+            return False
         if driver < need:
             too_old = too_old or (tag, need)
+            return False
+        return True
+
+    for tag, need in CUDA_TAGS:
+        if not usable(tag, need):
+            continue
+        torch_whl = _find_wheel("torch", base, tag)
+        if not torch_whl:
             continue
         wheels = [torch_whl]
         # torchaudio 有自己的版號；伺服器上沒有對應的 CUDA 版就沿用內附的
         audio = _find_wheel("torchaudio", _base(bundled_torch_version(pkg="torchaudio")), tag)
         if audio:
             wheels.append(audio)
-        return tag, wheels
+        found += 1
+        tried.add(torch_whl["filename"])
+        yield tag, wheels
+        break  # 同版號的只試最新的那一種 CUDA
+
+    for tag, need in LEGACY_TAGS:
+        # 已經知道這張卡夠新、同版號的也找到了，就不必準備舊顯示卡的退路
+        if found and cap is not None:
+            break
+        if not usable(tag, need):
+            continue
+        torch_whl = _find_wheel("torch", None, tag, not_newer_than=base)
+        if not torch_whl or torch_whl["filename"] in tried:
+            continue
+        found += 1
+        tried.add(torch_whl["filename"])
+        yield tag, [torch_whl]
+
+    if found:
+        return
     if too_old:
-        raise RuntimeError(f"PyTorch {base} 需要 {too_old[0]}，顯示卡驅動要更新到 "
-                           f"{too_old[1][0]}.{too_old[1][1]} 以上（目前 {gpu.get('driver')}）")
-    raise RuntimeError(f"PyTorch 官方伺服器上沒有 {base} 的 Windows CUDA 版")
+        raise RuntimeError(f"{too_old[0]} 版 PyTorch 需要顯示卡驅動 "
+                           f"{too_old[1][0]}.{too_old[1][1]} 以上（目前 {gpu.get('driver')}），請先更新驅動")
+    raise RuntimeError(f"PyTorch 官方伺服器上沒有這張顯示卡能用的 Windows CUDA 版（PyTorch {base}）")
 
 
-def _find_wheel(pkg: str, base: str | None, tag: str) -> dict | None:
-    """從 PyTorch 的 simple index 找出對應這個 Python 與版號的 Windows wheel。"""
-    if not base:
+def _ver_key(version: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", version))
+
+
+def _find_wheel(pkg: str, base: str | None, tag: str, not_newer_than: str | None = None) -> dict | None:
+    """從 PyTorch 的 simple index 找出對應這個 Python 的 Windows wheel。
+
+    給 base 就找剛好那個版號；給 not_newer_than 則找不超過它的最新正式版。
+    """
+    if not base and not not_newer_than:
         return None
     url = f"{INDEX_URL}/{tag}/{pkg}/"
     try:
@@ -406,22 +484,34 @@ def _find_wheel(pkg: str, base: str | None, tag: str) -> dict | None:
                 url, headers={"User-Agent": "karaoke-scoring"}), timeout=30) as resp:
             page = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
+        if exc.code in (403, 404):
             return None
         raise
 
     py = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    want = f"{pkg}-{base}+{tag}-{py}-{py}-win_amd64.whl"
+    pattern = re.compile(rf"{re.escape(pkg)}-(\d+(?:\.\d+)*)\+{re.escape(tag)}-{py}-{py}-win_amd64\.whl")
+    best = None
     for href in re.findall(r'href="([^"]+)"', page):
         href = html.unescape(href)
         link, _, frag = href.partition("#")
         name = urllib.parse.unquote(link.rsplit("/", 1)[-1])
-        if name != want:
+        m = pattern.fullmatch(name)
+        if not m:
             continue
-        full = urllib.parse.urljoin(url, link)
-        sha = frag.split("=", 1)[1] if frag.startswith("sha256=") else None
-        return {"filename": name, "url": full, "sha256": sha, "size": _head_size(full)}
-    return None
+        version = m.group(1)
+        if base:
+            if version != base:
+                continue
+        elif _ver_key(version) > _ver_key(not_newer_than):
+            continue
+        if best is None or _ver_key(version) > _ver_key(best[0]):
+            best = (version, name, link, frag)
+    if not best:
+        return None
+    _, name, link, frag = best
+    full = urllib.parse.urljoin(url, link)
+    sha = frag.split("=", 1)[1] if frag.startswith("sha256=") else None
+    return {"filename": name, "url": full, "sha256": sha, "size": _head_size(full)}
 
 
 def _head_size(url: str) -> int | None:
